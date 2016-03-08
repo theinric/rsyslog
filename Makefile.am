@@ -253,6 +253,10 @@ if ENABLE_OMAMQP1
 SUBDIRS += contrib/omamqp1
 endif
 
+if ENABLE_MMKUBERNETES
+SUBDIRS += contrib/mmkubernetes
+endif
+
 # tests are added as last element, because tests may need different
 # modules that need to be generated first
 SUBDIRS += tests

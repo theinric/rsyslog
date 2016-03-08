@@ -1692,6 +1692,22 @@ AM_CONDITIONAL(ENABLE_OMAMQP1, test x$enable_omamqp1 = xyes)
 
 # END AMQP 1.0 PROTOCOL SUPPORT
 
+# mmkubernetes - Kubernetes metadata support
+AC_ARG_ENABLE(mmkubernetes,
+        [AS_HELP_STRING([--enable-mmkubernetes],
+            [Enable compilation of the mmkubernetes module @<:@default=no@:>@])],
+        [case "${enableval}" in
+         yes) enable_mmkubernetes="yes" ;;
+          no) enable_mmkubernetes="no" ;;
+           *) AC_MSG_ERROR(bad value ${enableval} for --enable-mmkubernetes) ;;
+         esac],
+        [enable_mmkubernetes=no]
+)
+if test "x$enable_mmkubernetes" = "xyes"; then
+        PKG_CHECK_MODULES([CURL], [libcurl])
+fi
+AM_CONDITIONAL(ENABLE_MMKUBERNETES, test x$enable_mmkubernetes = xyes)
+
 # man pages
 AC_CHECKING([if required man pages already exist])
 have_to_generate_man_pages="no"
@@ -1818,6 +1834,7 @@ AC_CONFIG_FILES([Makefile \
 		contrib/pmcisconames/Makefile \
 		contrib/omhttpfs/Makefile \
 		contrib/omamqp1/Makefile \
+		contrib/mmkubernetes/Makefile \
 		tests/Makefile])
 AC_OUTPUT
 
@@ -1887,6 +1904,7 @@ echo "    mmutf8fix enabled:                        $enable_mmutf8fix"
 echo "    mmrfc5424addhmac enabled:                 $enable_mmrfc5424addhmac"
 echo "    mmpstrucdata enabled:                     $enable_mmpstrucdata"
 echo "    mmsequence enabled:                       $enable_mmsequence"
+echo "    mmkubernetes enabled:                     $enable_mmkubernetes"
 echo
 echo "---{ database support }---"
 echo "    MySql support enabled:                    $enable_mysql"
