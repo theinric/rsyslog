@@ -248,6 +248,10 @@ if ENABLE_OMHTTPFS
 SUBDIRS += contrib/omhttpfs
 endif
 
+if ENABLE_MMKUBERNETES
+SUBDIRS += contrib/mmkubernetes
+endif
+
 # tests are added as last element, because tests may need different
 # modules that need to be generated first
 SUBDIRS += tests
