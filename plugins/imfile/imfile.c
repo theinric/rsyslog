@@ -1542,6 +1542,7 @@ in_setupFileWatchStatic(lstn_t *pLstn)
 				getBasename(basen, file);
 				in_setupFileWatchDynamic(pLstn, basen);
 			}
+			globfree(&files);
 		}
 	} else {
 		/* Duplicate static object as well, otherwise the configobject could be deleted later! */
