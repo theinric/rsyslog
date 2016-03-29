@@ -7,18 +7,18 @@
  *
  * Module begun 2008-04-16 by Rainer Gerhards
  *
- * Copyright 2008-2015 Rainer Gerhards and Adiscon GmbH.
+ * Copyright 2008-2016 Rainer Gerhards and Adiscon GmbH.
  *
  * This file is part of the rsyslog runtime library.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *       http://www.apache.org/licenses/LICENSE-2.0
  *       -or-
  *       see COPYING.ASL20 in the source distribution
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -50,6 +50,7 @@
 #include "parserif.h"
 #include "rainerscript.h"
 #include "net.h"
+#include "rsconf.h"
 
 /* some defaults */
 #ifndef DFLT_NETSTRM_DRVR
@@ -84,7 +85,7 @@ static int bOptimizeUniProc = 1;	/* enable uniprocessor optimizations */
 static int bParseHOSTNAMEandTAG = 1;	/* parser modification (based on startup params!) */
 static int bPreserveFQDN = 0;		/* should FQDNs always be preserved? */
 static int iMaxLine = 8096;		/* maximum length of a syslog message */
-static int iGnuTLSLoglevel = 0;		
+static int iGnuTLSLoglevel = 0;
 static int iDefPFFamily = PF_UNSPEC;     /* protocol family (IPv4, IPv6 or both) */
 static int bDropMalPTRMsgs = 0;/* Drop messages which have malicious PTR records during DNS lookup */
 static int option_DisallowWarning = 1;	/* complain if message from disallowed sender is received */
@@ -111,6 +112,11 @@ static int bEscape8BitChars = 0; /* escape characters > 127 on reception: 0 - no
 static int bEscapeTab = 1; /* escape tab control character when doing CC escapes: 0 - no, 1 - yes */
 static int bParserEscapeCCCStyle = 0; /* escape control characters in c style: 0 - no, 1 - yes */
 short janitorInterval = 10; /* interval (in minutes) at which the janitor runs */
+int glblReportNewSenders = 0;
+int glblReportGoneAwaySenders = 0;
+int glblSenderStatsTimeout = 12 * 60 * 60; /* 12 hr timeout for senders */
+int glblSenderKeepTrack = 0;  /* keep track of known senders? */
+int glblUnloadModules = 1;
 
 pid_t glbl_ourpid;
 #ifndef HAVE_ATOMIC_BUILTINS
@@ -133,6 +139,7 @@ static struct cnfparamdescr cnfparamdescr[] = {
 	{ "debug.onshutdown", eCmdHdlrBinary, 0 },
 	{ "debug.logfile", eCmdHdlrString, 0 },
 	{ "debug.gnutls", eCmdHdlrPositiveInt, 0 },
+	{ "debug.unloadmodules", eCmdHdlrBinary, 0 },
 	{ "defaultnetstreamdrivercafile", eCmdHdlrString, 0 },
 	{ "defaultnetstreamdriverkeyfile", eCmdHdlrString, 0 },
         { "defaultnetstreamdrivercertfile", eCmdHdlrString, 0 },
@@ -150,6 +157,11 @@ static struct cnfparamdescr cnfparamdescr[] = {
 	{ "parser.parsehostnameandtag", eCmdHdlrBinary, 0 },
 	{ "stdlog.channelspec", eCmdHdlrString, 0 },
 	{ "janitor.interval", eCmdHdlrPositiveInt, 0 },
+	{ "senders.reportnew", eCmdHdlrBinary, 0 },
+	{ "senders.reportgoneaway", eCmdHdlrBinary, 0 },
+	{ "senders.timeoutafter", eCmdHdlrPositiveInt, 0 },
+	{ "senders.keeptrack", eCmdHdlrBinary, 0 },
+	{ "privdrop.group.keepsupplemental", eCmdHdlrBinary, 0 },
 	{ "net.ipprotocol", eCmdHdlrGetWord, 0 },
 	{ "net.acladdhostnameonfail", eCmdHdlrBinary, 0 },
 	{ "net.aclresolvehostname", eCmdHdlrBinary, 0 },
@@ -164,8 +176,8 @@ static struct cnfparamblk paramblk =
 	};
 
 static struct cnfparamdescr timezonecnfparamdescr[] = {
-	{ "id", eCmdHdlrString, 0 },
-	{ "offset", eCmdHdlrGetWord, 0 }
+	{ "id", eCmdHdlrString, CNFPARAM_REQUIRED},
+	{ "offset", eCmdHdlrGetWord, CNFPARAM_REQUIRED }
 };
 static struct cnfparamblk timezonepblk =
 	{ CNFPARAMBLK_VERSION,
@@ -826,7 +838,11 @@ addTimezoneInfo(uchar *tzid, char offsMode, int8_t offsHour, int8_t offsMin)
 	DEFiRet;
 	tzinfo_t *newti;
 	CHKmalloc(newti = realloc(tzinfos, (ntzinfos+1)*sizeof(tzinfo_t)));
-	CHKmalloc(newti[ntzinfos].id = strdup((char*)tzid));
+	if((newti[ntzinfos].id = strdup((char*)tzid)) == NULL) {
+		free(newti);
+		DBGPRINTF("addTimezoneInfo: strdup failed with OOM\n");
+		ABORT_FINALIZE(RS_RET_OUT_OF_MEMORY);
+	}
 	newti[ntzinfos].offsMode = offsMode;
 	newti[ntzinfos].offsHour = offsHour;
 	newti[ntzinfos].offsMin = offsMin;
@@ -863,8 +879,10 @@ glblProcessTimezone(struct cnfobj *o)
 	int i;
 
 	pvals = nvlstGetParams(o->nvlst, &timezonepblk, NULL);
-	dbgprintf("timezone param blk after glblProcessTimezone:\n");
-	cnfparamsPrint(&timezonepblk, pvals);
+	if(Debug) {
+		dbgprintf("timezone param blk after glblProcessTimezone:\n");
+		cnfparamsPrint(&timezonepblk, pvals);
+	}
 
 	for(i = 0 ; i < timezonepblk.nParams ; ++i) {
 		if(!pvals[i].bUsed)
@@ -877,6 +895,20 @@ glblProcessTimezone(struct cnfobj *o)
 			dbgprintf("glblProcessTimezone: program error, non-handled "
 			  "param '%s'\n", timezonepblk.descr[i].name);
 		}
+	}
+
+	/* note: the following two checks for NULL are not strictly necessary
+	 * as these are required parameters for the config block. But we keep
+	 * them to make the clang static analyzer happy, which also helps
+	 * guard against logic errors.
+	 */
+	if(offset == NULL) {
+		parser_errmsg("offset parameter missing (logic error?), timezone config ignored");
+		goto done;
+	}
+	if(id == NULL) {
+		parser_errmsg("id parameter missing (logic error?), timezone config ignored");
+		goto done;
 	}
 
 	if(   strlen((char*)offset) != 6
@@ -917,8 +949,15 @@ glblProcessCnf(struct cnfobj *o)
 	int i;
 
 	cnfparamvals = nvlstGetParams(o->nvlst, &paramblk, cnfparamvals);
-	dbgprintf("glbl param blk after glblProcessCnf:\n");
-	cnfparamsPrint(&paramblk, cnfparamvals);
+	if(cnfparamvals == NULL) {
+		errmsg.LogError(0, RS_RET_MISSING_CNFPARAMS, "error processing global "
+				"config parameters [global(...)]");
+		goto done;
+	}
+	if(Debug) {
+		dbgprintf("glbl param blk after glblProcessCnf:\n");
+		cnfparamsPrint(&paramblk, cnfparamvals);
+	}
 
 	/* The next thing is a bit hackish and should be changed in higher
 	 * versions. There are a select few parameters which we need to
@@ -952,6 +991,7 @@ glblProcessCnf(struct cnfobj *o)
 #endif
 		}
 	}
+done:	return;
 }
 
 /* Set mainq parameters. Note that when this is not called, we'll use the
@@ -1049,6 +1089,8 @@ glblDoneLoadCnf(void)
 			errmsg.LogError(0, RS_RET_OK, "debug: onShutdown set to %d", glblDebugOnShutdown);
 		} else if(!strcmp(paramblk.descr[i].name, "debug.gnutls")) {
 			iGnuTLSLoglevel = (int) cnfparamvals[i].val.d.n;
+		} else if(!strcmp(paramblk.descr[i].name, "debug.unloadmodules")) {
+			glblUnloadModules = (int) cnfparamvals[i].val.d.n;
 		} else if(!strcmp(paramblk.descr[i].name, "parser.controlcharacterescapeprefix")) {
 			cCCEscapeChar = (uchar) *es_str2cstr(cnfparamvals[i].val.d.estr, NULL);
 		} else if(!strcmp(paramblk.descr[i].name, "parser.droptrailinglfonreception")) {
@@ -1088,6 +1130,16 @@ glblDoneLoadCnf(void)
 					"parameter '%s' -- ignored", proto);
 			}
 			free(proto);
+		} else if(!strcmp(paramblk.descr[i].name, "senders.reportnew")) {
+		        glblReportNewSenders = (int) cnfparamvals[i].val.d.n;
+		} else if(!strcmp(paramblk.descr[i].name, "senders.reportgoneaway")) {
+		        glblReportGoneAwaySenders = (int) cnfparamvals[i].val.d.n;
+		} else if(!strcmp(paramblk.descr[i].name, "senders.timeoutafter")) {
+		        glblSenderStatsTimeout = (int) cnfparamvals[i].val.d.n;
+		} else if(!strcmp(paramblk.descr[i].name, "senders.keeptrack")) {
+		        glblSenderKeepTrack = (int) cnfparamvals[i].val.d.n;
+		} else if(!strcmp(paramblk.descr[i].name, "privdrop.group.keepsupplemental")) {
+		        loadConf->globals.gidDropPrivKeepSupplemental = (int) cnfparamvals[i].val.d.n;
 		} else if(!strcmp(paramblk.descr[i].name, "net.acladdhostnameonfail")) {
 		        *(net.pACLAddHostnameOnFail) = (int) cnfparamvals[i].val.d.n;
 		} else if(!strcmp(paramblk.descr[i].name, "net.aclresolvehostname")) {

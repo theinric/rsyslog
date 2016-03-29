@@ -199,7 +199,6 @@ int makeFileParentDirs(const uchar *const szFile, size_t lenFile, mode_t mode,
         uchar *p;
         uchar *pszWork;
         size_t len;
-	int err;
 	int iTry = 0;
 	int bErr = 0;
 
@@ -207,16 +206,17 @@ int makeFileParentDirs(const uchar *const szFile, size_t lenFile, mode_t mode,
 	assert(lenFile > 0);
 
         len = lenFile + 1; /* add one for '\0'-byte */
-	if((pszWork = MALLOC(sizeof(uchar) * len)) == NULL)
+	if((pszWork = MALLOC(len)) == NULL)
 		return -1;
         memcpy(pszWork, szFile, len);
         for(p = pszWork+1 ; *p ; p++)
                 if(*p == '/') {
 			/* temporarily terminate string, create dir and go on */
                         *p = '\0';
+			iTry = 0;
 again:
                         if(access((char*)pszWork, F_OK)) {
-                                if((err = mkdir((char*)pszWork, mode)) == 0) {
+                                if(mkdir((char*)pszWork, mode) == 0) {
 					if(uid != (uid_t) -1 || gid != (gid_t) -1) {
 						/* we need to set owner/group */
 						if(chown((char*)pszWork, uid, gid) != 0)
@@ -227,7 +227,7 @@ again:
 							 */
 					}
 				} else {
-					if(err == EEXIST && iTry == 0) {
+					if(errno == EEXIST && iTry == 0) {
 						iTry = 1;
 						goto again;
 						}
@@ -356,7 +356,7 @@ rsRetVal genFileName(uchar **ppName, uchar *pDirName, size_t lenDirName, uchar *
 	}
 
 	lenName = lenDirName + 1 + lenFName + lenBuf + 1; /* last +1 for \0 char! */
-	if((pName = MALLOC(sizeof(uchar) * lenName)) == NULL)
+	if((pName = MALLOC(lenName)) == NULL)
 		ABORT_FINALIZE(RS_RET_OUT_OF_MEMORY);
 	
 	/* got memory, now construct string */
@@ -655,6 +655,17 @@ containsGlobWildcard(char *str)
 		}
 	}
 	return 0;
+}
+
+void seedRandomNumber() {
+	struct timespec t;
+	timeoutComp(&t, 0);
+	long long x = t.tv_sec * 3 + t.tv_nsec * 2;
+	srandom((unsigned int) x);
+}
+
+long int randomNumber() {
+	return random();
 }
 
 /* vim:set ai:

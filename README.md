@@ -37,8 +37,8 @@ Building from Source
 --------------------
 Follow the instructions at: http://www.rsyslog.com/doc/build_from_repo.html
 
-Build Environment
-.................
+### Build Environment
+
 
 In general, you need
 
@@ -47,45 +47,51 @@ In general, you need
 
 It is best to build these from source.
 
-CentOS 6
-~~~~~~~~
+#### CentOS 6
 
 for json-c, we need
+```
   $ export PKG_CONFIG_PATH=/lib64/pkgconfig/
-
+```
+```
 sudo yum install git valgrind autoconf automake flex bison python-docutils python-sphinx json-c-devel libuuid-devel libgcrypt-devel zlib-devel openssl-devel libcurl-devel gnutls-devel mysql-devel postgresql-devel libdbi-dbd-mysql libdbi-devel net-snmp-devel
+```
 
 
-
-Ubuntu
-~~~~~~
+#### Ubuntu
 
 Note: this list is (obviously) incomplete. We intend to complete it as we 
 have more information and install additional systems.
+```
+sudo apt-get install libdbi-dev libmysqlclient-dev postgresql-client libpq-dev  libnet-dev   librdkafka-dev   libgrok-dev libgrok1 libgrok-dev libpcre3-dev libtokyocabinet-dev libglib2.0-dev  libmongo-client-dev  libhiredis-dev
+```
+for KSI, from the Adiscon PPA:
+```
+sudo apt-get install libksi0 libksi-devel
+```
 
-sudo apt-get install libdbi-dev
+#### openSUSE 13
 
-
-openSUSE 13
-~~~~~~~~~~~
-
+```
 sudo zypper install gcc make autoconf automake libtool libcurl-devel flex bison valgrind python-docutils libjson-devel uuid-devel libgcrypt-devel libgnutls-devel libmysqlclient-devel libdbi-devel libnet-devel postgresql-devel net-snmp-devellibuuid-devel libdbi-drivers-dbd-mysql
-
+```
 For the testbench VMs:
-
+```
 sudo zypper install gvim mutt
+```
 
 
+#### SUSE LINUX Enterprise Server 11
 
-SUSE LINUX Enterprise Server 11
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Available Packages:
+```
 zypper install gcc make autoconf libtool flex bison
+```
 
 Missing Packages:
+```
 libcurl-devel valgrind python-docutils uuid-devel libgcrypt-devel libgnutls-devel libmysqlclient-devel libdbi-devel postgresql-devel net-snmp-devel libdbi-drivers-dbd-mysql json-c zlib-dev libdbi
-
-
+```
 
 Reporting Bugs
 ==============
@@ -102,7 +108,7 @@ Contributions to rsyslog are very welcome. Fork and send us your Pull Requests.
 For more information about contributing, see the
 [CONTRIBUTING](CONTRIBUTING.md) file.
 
-Note that it is esay to add output plugins using languages like Python or
+Note that it is easy to add output plugins using languages like Python or
 Perl. So if you need to connect to a system which is not yet supported, you
 can easily do so via an external plugin. For more information see the
 [README](plugins/external/README.md) file in the external plugin directory.
@@ -118,7 +124,7 @@ Project Philosophy
 ==================
 We are an open source project in all aspects and very open to outside feedback
 and contribution. We base our work on standards and try to solve all real-world
-needs (of course, we occasionally fail tackeling actually all needs ;)). While
+needs (of course, we occasionally fail tackling actually all needs ;)). While
 the project is primarily sponsored by Adiscon, technical development is 
 independent from company goals and most decisions are solely based on mailing
 list discussion results. There is an active community around rsyslog.

@@ -86,6 +86,11 @@ typedef struct _instanceData {
 	char *port;
 	int protocol;
 	int iRebindInterval;	/* rebind interval */
+	sbool bKeepAlive;
+	int iKeepAliveIntvl;
+	int iKeepAliveProbes;
+	int iKeepAliveTime;
+
 #	define	FORW_UDP 0
 #	define	FORW_TCP 1
 	/* following fields for UDP-based delivery */
@@ -128,6 +133,10 @@ typedef struct configSettings_s {
 	uchar *pszStrmDrvrAuthMode; /* authentication mode to use */
 	int iTCPRebindInterval;	/* support for automatic re-binding (load balancers!). 0 - no rebind */
 	int iUDPRebindInterval;	/* support for automatic re-binding (load balancers!). 0 - no rebind */
+	int bKeepAlive;
+	int iKeepAliveIntvl;
+	int iKeepAliveProbes;
+	int iKeepAliveTime;
 	permittedPeers_t *pPermPeers;
 } configSettings_t;
 static configSettings_t cs;
@@ -154,6 +163,10 @@ static struct cnfparamdescr actpdescr[] = {
 	{ "compression.stream.flushontxend", eCmdHdlrBinary, 0 },
 	{ "maxerrormessages", eCmdHdlrInt, 0 },
 	{ "rebindinterval", eCmdHdlrInt, 0 },
+	{ "keepalive", eCmdHdlrBinary, 0 },
+	{ "keepalive.probes", eCmdHdlrPositiveInt, 0 },
+	{ "keepalive.time", eCmdHdlrPositiveInt, 0 },
+	{ "keepalive.interval", eCmdHdlrPositiveInt, 0 },
 	{ "streamdriver", eCmdHdlrGetWord, 0 },
 	{ "streamdrivermode", eCmdHdlrInt, 0 },
 	{ "streamdriverauthmode", eCmdHdlrGetWord, 0 },
@@ -161,7 +174,7 @@ static struct cnfparamdescr actpdescr[] = {
 	{ "resendlastmsgonreconnect", eCmdHdlrBinary, 0 },
 	{ "udp.sendtoall", eCmdHdlrBinary, 0 },
 	{ "udp.senddelay", eCmdHdlrInt, 0 },
-	{ "template", eCmdHdlrGetWord, 0 },
+	{ "template", eCmdHdlrGetWord, 0 }
 };
 static struct cnfparamblk actpblk =
 	{ CNFPARAMBLK_VERSION,
@@ -281,10 +294,10 @@ CODESTARTbeginCnfLoad
 ENDbeginCnfLoad
 
 BEGINsetModCnf
-	struct cnfparamvals *pvals = NULL;
 	int i;
 CODESTARTsetModCnf
-	if((pvals = nvlstGetParams(lst, &modpblk, NULL))) {
+	const struct cnfparamvals *const __restrict__ pvals = nvlstGetParams(lst, &modpblk, NULL);
+	if(pvals == NULL) {
 		ABORT_FINALIZE(RS_RET_MISSING_CNFPARAMS);
 	}
 
@@ -584,8 +597,7 @@ doZipFinish(wrkrInstanceData_t *pWrkrData)
 	if(!pWrkrData->bzInitDone)
 		goto done;
 
-// TODO: can we get this into a single common function?
-dbgprintf("DDDD: in doZipFinish()\n");
+	// TODO: can we get this into a single common function?
 	pWrkrData->zstrm.avail_in = 0;
 	/* run deflate() on buffer until everything has been compressed */
 	do {
@@ -621,10 +633,15 @@ static rsRetVal TCPSendFrame(void *pvData, char *msg, size_t len)
 	DBGPRINTF("omfwd: add %u bytes to send buffer (curr offs %u)\n",
 		(unsigned) len, pWrkrData->offsSndBuf);
 	if(pWrkrData->offsSndBuf != 0 && pWrkrData->offsSndBuf + len >= sizeof(pWrkrData->sndBuf)) {
-		/* no buffer space left, need to commit previous records */
+		/* no buffer space left, need to commit previous records. With the
+		 * current API, there unfortunately is no way to signal this
+		 * state transition to the upper layer.
+		 */
+		DBGPRINTF("omfwd: we need to do a tcp send due to buffer "
+			  "out of space. If the transaction fails, this will "
+			  "lead to duplication of messages");
 		CHKiRet(TCPSendBuf(pWrkrData, pWrkrData->sndBuf, pWrkrData->offsSndBuf, NO_FLUSH));
 		pWrkrData->offsSndBuf = 0;
-		iRet = RS_RET_PREVIOUS_COMMITTED;
 	}
 
 	/* check if the message is too large to fit into buffer */
@@ -691,6 +708,14 @@ static rsRetVal TCPSendInit(void *pvData)
 		/* params set, now connect */
 		CHKiRet(netstrm.Connect(pWrkrData->pNetstrm, glbl.GetDefPFFamily(),
 			(uchar*)pData->port, (uchar*)pData->target));
+
+		/* set keep-alive if enabled */
+		if(pData->bKeepAlive) {
+			CHKiRet(netstrm.SetKeepAliveProbes(pWrkrData->pNetstrm, pData->iKeepAliveProbes));
+			CHKiRet(netstrm.SetKeepAliveIntvl(pWrkrData->pNetstrm, pData->iKeepAliveIntvl));
+			CHKiRet(netstrm.SetKeepAliveTime(pWrkrData->pNetstrm, pData->iKeepAliveTime));
+			CHKiRet(netstrm.EnableKeepAlive(pWrkrData->pNetstrm));
+		}
 	}
 
 finalize_it:
@@ -756,14 +781,14 @@ finalize_it:
 
 BEGINtryResume
 CODESTARTtryResume
-	dbgprintf("DDDD: tryResume: pWrkrData %p\n", pWrkrData);
+	dbgprintf("omfwd: tryResume: pWrkrData %p\n", pWrkrData);
 	iRet = doTryResume(pWrkrData);
 ENDtryResume
 
 
 BEGINbeginTransaction
 CODESTARTbeginTransaction
-dbgprintf("omfwd: beginTransaction\n");
+	dbgprintf("omfwd: beginTransaction\n");
 	iRet = doTryResume(pWrkrData);
 ENDbeginTransaction
 
@@ -855,7 +880,6 @@ CODESTARTcommitTransaction
 			FINALIZE;
 	}
 
-dbgprintf("omfwd: endTransaction, offsSndBuf %u, iRet %d\n", pWrkrData->offsSndBuf, iRet);
 	if(pWrkrData->offsSndBuf != 0) {
 		iRet = TCPSendBuf(pWrkrData, pWrkrData->sndBuf, pWrkrData->offsSndBuf, IS_FLUSH);
 		pWrkrData->offsSndBuf = 0;
@@ -917,6 +941,10 @@ setInstParamDefaults(instanceData *pData)
 	pData->pszStrmDrvrAuthMode = NULL;
 	pData->iStrmDrvrMode = 0;
 	pData->iRebindInterval = 0;
+	pData->bKeepAlive = 0;
+	pData->iKeepAliveProbes = 0;
+	pData->iKeepAliveIntvl = 0;
+	pData->iKeepAliveTime = 0;
 	pData->bResendLastOnRecon = 0; 
 	pData->bSendToAll = -1;  /* unspecified */
 	pData->iUDPSendDelay = 0;
@@ -993,6 +1021,14 @@ CODESTARTnewActInst
 			}
 		} else if(!strcmp(actpblk.descr[i].name, "rebindinterval")) {
 			pData->iRebindInterval = (int) pvals[i].val.d.n;
+		} else if(!strcmp(actpblk.descr[i].name, "keepalive")) {
+			pData->bKeepAlive = (int) pvals[i].val.d.n;
+		} else if(!strcmp(actpblk.descr[i].name, "keepaliveprobes")) {
+			pData->iKeepAliveProbes = (int) pvals[i].val.d.n;
+		} else if(!strcmp(actpblk.descr[i].name, "keepaliveintvl")) {
+			pData->iKeepAliveIntvl = (int) pvals[i].val.d.n;
+		} else if(!strcmp(actpblk.descr[i].name, "keepalivetime")) {
+			pData->iKeepAliveTime = (int) pvals[i].val.d.n;
 		} else if(!strcmp(actpblk.descr[i].name, "streamdriver")) {
 			pData->pszStrmDrvr = (uchar*)es_str2cstr(pvals[i].val.d.estr, NULL);
 		} else if(!strcmp(actpblk.descr[i].name, "streamdrivermode")) {
@@ -1090,7 +1126,7 @@ CODESTARTnewActInst
 		pData->bSendToAll = send_to_all;
 	} else {
 		if(pData->protocol == FORW_TCP) {
-			errmsg.LogError(0, RS_RET_PARAM_ERROR, "omfwd: paramter udp.sendToAll "
+			errmsg.LogError(0, RS_RET_PARAM_ERROR, "omfwd: parameter udp.sendToAll "
 					"cannot be used with tcp transport -- ignored");
 		}
 	}
@@ -1241,6 +1277,11 @@ CODE_STD_STRING_REQUESTparseSelectorAct(1)
 	pData->iRebindInterval = (pData->protocol == FORW_TCP) ?
 				 cs.iTCPRebindInterval : cs.iUDPRebindInterval;
 
+	pData->bKeepAlive = cs.bKeepAlive;
+	pData->iKeepAliveProbes = cs.iKeepAliveProbes;
+	pData->iKeepAliveIntvl = cs.iKeepAliveIntvl;
+	pData->iKeepAliveTime = cs.iKeepAliveTime;
+
 	/* process template */
 	CHKiRet(cflineParseTemplateName(&p, *ppOMSR, 0, OMSR_NO_RQD_TPL_OPTS, getDfltTpl()));
 
@@ -1311,6 +1352,10 @@ static rsRetVal resetConfigVariables(uchar __attribute__((unused)) *pp, void __a
 	cs.bResendLastOnRecon = 0;
 	cs.iUDPRebindInterval = 0;
 	cs.iTCPRebindInterval = 0;
+	cs.bKeepAlive = 0;
+	cs.iKeepAliveProbes = 0;
+	cs.iKeepAliveIntvl = 0;
+	cs.iKeepAliveTime = 0;
 
 	return RS_RET_OK;
 }
@@ -1328,6 +1373,10 @@ CODEmodInit_QueryRegCFSLineHdlr
 	CHKiRet(regCfSysLineHdlr((uchar *)"actionforwarddefaulttemplate", 0, eCmdHdlrGetWord, setLegacyDfltTpl, NULL, NULL));
 	CHKiRet(regCfSysLineHdlr((uchar *)"actionsendtcprebindinterval", 0, eCmdHdlrInt, NULL, &cs.iTCPRebindInterval, NULL));
 	CHKiRet(regCfSysLineHdlr((uchar *)"actionsendudprebindinterval", 0, eCmdHdlrInt, NULL, &cs.iUDPRebindInterval, NULL));
+	CHKiRet(regCfSysLineHdlr((uchar *)"actionsendtcpkeepalive", 0, eCmdHdlrBinary, NULL, &cs.bKeepAlive, NULL));
+	CHKiRet(regCfSysLineHdlr((uchar *)"actionsendtcpkeepalive_probes", 0, eCmdHdlrInt, NULL, &cs.iKeepAliveProbes, NULL));
+	CHKiRet(regCfSysLineHdlr((uchar *)"actionsendtcpkeepalive_intvl", 0, eCmdHdlrInt, NULL, &cs.iKeepAliveIntvl, NULL));
+	CHKiRet(regCfSysLineHdlr((uchar *)"actionsendtcpkeepalive_time", 0, eCmdHdlrInt, NULL, &cs.iKeepAliveTime, NULL));
 	CHKiRet(regCfSysLineHdlr((uchar *)"actionsendstreamdriver", 0, eCmdHdlrGetWord, NULL, &cs.pszStrmDrvr, NULL));
 	CHKiRet(regCfSysLineHdlr((uchar *)"actionsendstreamdrivermode", 0, eCmdHdlrInt, NULL, &cs.iStrmDrvrMode, NULL));
 	CHKiRet(regCfSysLineHdlr((uchar *)"actionsendstreamdriverauthmode", 0, eCmdHdlrGetWord, NULL, &cs.pszStrmDrvrAuthMode, NULL));

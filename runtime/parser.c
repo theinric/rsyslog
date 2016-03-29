@@ -4,7 +4,7 @@
  *
  * Module begun 2008-10-09 by Rainer Gerhards (based on previous code from syslogd.c)
  *
- * Copyright 2008-2014 Rainer Gerhards and Adiscon GmbH.
+ * Copyright 2008-2015 Rainer Gerhards and Adiscon GmbH.
  *
  * This file is part of the rsyslog runtime library.
  *
@@ -280,7 +280,7 @@ rsRetVal
 parserConstructViaModAndName(modInfo_t *__restrict__ pMod, uchar *const __restrict__ pName, void *pInst)
 {
 	rsRetVal localRet;
-	parser_t *pParser;
+	parser_t *pParser = NULL;
 	DEFiRet;
 
 	if(pInst == NULL && pMod->mod.pm.newParserInst != NULL) {
@@ -303,6 +303,8 @@ parserConstructViaModAndName(modInfo_t *__restrict__ pMod, uchar *const __restri
 	pParser->pInst = pInst;
 	CHKiRet(parserConstructFinalize(pParser));
 finalize_it:
+	if(iRet != RS_RET_OK)
+		free(pParser);
 	RETiRet;
 }
 BEGINobjDestruct(parser) /* be sure to specify the object type also in END and CODESTART macros! */
@@ -344,7 +346,7 @@ static inline rsRetVal uncompressMessage(msg_t *pMsg)
 		 */
 		int ret;
 		iLenDefBuf = glbl.GetMaxLine();
-		CHKmalloc(deflateBuf = MALLOC(sizeof(uchar) * (iLenDefBuf + 1)));
+		CHKmalloc(deflateBuf = MALLOC(iLenDefBuf + 1));
 		ret = uncompress((uchar *) deflateBuf, &iLenDefBuf, (uchar *) pszMsg+1, lenMsg-1);
 		DBGPRINTF("Compressed message uncompressed with status %d, length: new %ld, old %d.\n",
 		        ret, (long) iLenDefBuf, (int) (lenMsg-1));
@@ -422,7 +424,8 @@ SanitizeMsg(msg_t *pMsg)
 	 * compatible to recent IETF developments, we allow the user to
 	 * turn on/off this handling.  rgerhards, 2007-07-23
 	 */
-	if(glbl.GetParserDropTrailingLFOnReception() && pszMsg[lenMsg-1] == '\n') {
+	if(glbl.GetParserDropTrailingLFOnReception()
+	   && lenMsg > 0 && pszMsg[lenMsg-1] == '\n') {
 		DBGPRINTF("dropped LF at very end of message (DropTrailingLF is set)\n");
 		lenMsg--;
 		pszMsg[lenMsg] = '\0';
@@ -473,7 +476,7 @@ SanitizeMsg(msg_t *pMsg)
 	if(maxDest < sizeof(szSanBuf))
 		pDst = szSanBuf;
 	else 
-		CHKmalloc(pDst = MALLOC(sizeof(uchar) * (iMaxLine + 1)));
+		CHKmalloc(pDst = MALLOC(iMaxLine + 1));
 	if(iSrc > 0) {
 		iSrc--; /* go back to where everything is OK */
 		memcpy(pDst, pszMsg, iSrc); /* fast copy known good */

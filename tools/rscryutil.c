@@ -146,7 +146,7 @@ done:	return r;
 static int
 eiGetEND(FILE *eifp, off64_t *offs)
 {
-	char rectype[EIF_MAX_RECTYPE_LEN+1];
+	char rectype[EIF_MAX_RECTYPE_LEN+1] = "";
 	char value[EIF_MAX_VALUE_LEN+1];
 	int r;
 
@@ -276,13 +276,23 @@ doDecrypt(FILE *logfp, FILE *eifp, FILE *outfp)
 {
 	off64_t blkEnd;
 	off64_t currOffs = 0;
-	int r;
+	int r = 1;
+	int fd;
+        struct stat buf;
 
 	while(1) {
 		/* process block */
 		if(initCrypt(eifp) != 0)
 			goto done;
-		if((r = eiGetEND(eifp, &blkEnd)) != 0) goto done;
+		/* set blkEnd to size of logfp and proceed. */
+                if((fd = fileno(logfp)) == -1) {
+                        r = -1;
+                        goto done;
+                }
+                if((r = fstat(fd, &buf)) != 0) goto done;
+                blkEnd = buf.st_size;
+                r = eiGetEND(eifp, &blkEnd);
+                if(r != 0 && r != 1) goto done;
 		decryptBlock(logfp, outfp, blkEnd, &currOffs);
 		gcry_cipher_close(gcry_chd);
 	}
@@ -337,6 +347,10 @@ write_keyfile(char *fn)
 	fmode = O_WRONLY|O_CREAT;
 	if(!optionForce)
 		fmode |= O_EXCL;
+	if(fn == NULL) {
+		fprintf(stderr, "program error: keyfile is NULL");
+		exit(1);
+	}
 	if((fd = open(fn, fmode, S_IRUSR)) == -1) {
 		fprintf(stderr, "error opening keyfile ");
 		perror(fn);

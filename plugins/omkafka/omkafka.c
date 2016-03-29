@@ -52,6 +52,7 @@ DEFobjCurrIf(errmsg)
 DEFobjCurrIf(statsobj)
 
 statsobj_t *kafkaStats;
+int ctrQueueSize;
 STATSCOUNTER_DEF(ctrTopicSubmit, mutCtrTopicSubmit);
 STATSCOUNTER_DEF(ctrKafkaFail, mutCtrKafkaFail);
 STATSCOUNTER_DEF(ctrCacheMiss, mutCtrCacheMiss);
@@ -113,18 +114,20 @@ typedef struct _instanceData {
 	sbool autoPartition;
 	int fixedPartition;
 	int nPartitions;
-	int32_t currPartition;
+	uint32_t currPartition;
 	int nConfParams;
 	struct kafka_params *confParams;
 	int nTopicConfParams;
 	struct kafka_params *topicConfParams;
 	uchar *errorFile;
+	uchar *key;
 	int fdErrFile;		/* error file fd or -1 if not open */
 	pthread_mutex_t mutErrFile;
 	int bIsOpen;
 	pthread_rwlock_t rkLock;
 	rd_kafka_t *rk;
 	int closeTimeout;
+	int bReopenOnHup;
 } instanceData;
 
 typedef struct wrkrInstanceData {
@@ -145,8 +148,10 @@ static struct cnfparamdescr actpdescr[] = {
 	{ "confparam", eCmdHdlrArray, 0 },
 	{ "topicconfparam", eCmdHdlrArray, 0 },
 	{ "errorfile", eCmdHdlrGetWord, 0 },
+	{ "key", eCmdHdlrGetWord, 0 },
 	{ "template", eCmdHdlrGetWord, 0 },
-	{ "closeTimeout", eCmdHdlrPositiveInt, 0 }
+	{ "closeTimeout", eCmdHdlrPositiveInt, 0 },
+	{ "reopenOnHup", eCmdHdlrBinary, 0 }
 };
 static struct cnfparamblk actpblk =
 	{ CNFPARAMBLK_VERSION,
@@ -158,16 +163,16 @@ BEGINinitConfVars		/* (re)set config variables to default values */
 CODESTARTinitConfVars 
 ENDinitConfVars
 
-static inline int
+static inline uint32_t
 getPartition(instanceData *const __restrict__ pData)
 {
 	if (pData->autoPartition) {
 		return RD_KAFKA_PARTITION_UA;
 	} else {
 		return (pData->fixedPartition == NO_FIXED_PARTITION) ?
-		          ATOMIC_INC_AND_FETCH_int(&pData->currPartition,
+		          ATOMIC_INC_AND_FETCH_unsigned(&pData->currPartition,
 			      &pData->mutCurrPartition) % pData->nPartitions
-			:  pData->fixedPartition;
+			:  (unsigned) pData->fixedPartition;
 	}
 }
 
@@ -388,7 +393,10 @@ prepareDynTopic(instanceData *__restrict__ const pData, const uchar *__restrict_
 		STATSCOUNTER_INC(ctrCacheEvict, mutCtrCacheEvict);
 		iFirstFree = iOldest; /* this one *is* now free ;) */
 	} else {
-		/* we need to allocate memory for the cache structure */
+		pCache[iFirstFree] = NULL;
+	}
+	/* we need to allocate memory for the cache structure */
+	if(pCache[iFirstFree] == NULL) {
 		CHKmalloc(pCache[iFirstFree] = (dynaTopicCacheEntry*) calloc(1, sizeof(dynaTopicCacheEntry)));
 		CHKiRet(pthread_rwlock_init(&pCache[iFirstFree]->lock, NULL));
 	}
@@ -689,7 +697,9 @@ CODESTARTdoHUP
 		pData->fdErrFile = -1;
 	}
 	pthread_mutex_unlock(&pData->mutErrFile);
-	CHKiRet(setupKafkaHandle(pData, 1));
+	if (pData->bReopenOnHup) {
+		CHKiRet(setupKafkaHandle(pData, 1));
+	}
 finalize_it:
 ENDdoHUP
 
@@ -700,6 +710,7 @@ CODESTARTcreateInstance
 	pData->fdErrFile = -1;
 	pData->pTopic = NULL;
 	pData->bReportErrs = 1;
+	pData->bReopenOnHup = 1;
 	CHKiRet(pthread_mutex_init(&pData->mutErrFile, NULL));
 	CHKiRet(pthread_rwlock_init(&pData->rkLock, NULL));
 	CHKiRet(pthread_mutex_init(&pData->mutDynCache, NULL));
@@ -786,8 +797,9 @@ writeKafka(instanceData *pData, uchar *msg, uchar *topic)
 	const int partition = getPartition(pData);
 	rd_kafka_topic_t *rkt = NULL;
 	pthread_rwlock_t *dynTopicLock = NULL;
+	int msg_enqueue_status = 0;
 
-	DBGPRINTF("omkafka: trying to send: '%s'\n", msg);
+	DBGPRINTF("omkafka: trying to send: key:'%s', msg:'%s'\n", pData->key, msg);
 
 	if(pData->dynaTopic) {
 		DBGPRINTF("omkafka: topic to insert to: %s\n", topic);
@@ -795,29 +807,39 @@ writeKafka(instanceData *pData, uchar *msg, uchar *topic)
 	} else {
 		rkt = pData->pTopic;
 	}
-	if(rd_kafka_produce(rkt, partition, RD_KAFKA_MSG_F_COPY,
-	                    msg, strlen((char*)msg), NULL, 0, NULL) == -1) {
+
+	msg_enqueue_status = rd_kafka_produce(rkt, partition, RD_KAFKA_MSG_F_COPY,
+										  msg, strlen((char*)msg), pData->key,
+										  pData->key == NULL ? 0 : strlen((char*)pData->key),
+										  NULL);
+	if(msg_enqueue_status == -1) {
 		errmsg.LogError(0, RS_RET_KAFKA_PRODUCE_ERR,
 			"omkafka: Failed to produce to topic '%s' "
 			"partition %d: %s\n",
 			rd_kafka_topic_name(rkt), partition,
 			rd_kafka_err2str(rd_kafka_errno2err(errno)));
-		STATSCOUNTER_INC(ctrKafkaFail, mutCtrKafkaFail);
-		ABORT_FINALIZE(RS_RET_KAFKA_PRODUCE_ERR);
 	}
 	const int callbacksCalled = rd_kafka_poll(pData->rk, 0); /* call callbacks */
 	if (pData->dynaTopic) {
 		pthread_rwlock_unlock(dynTopicLock);/* dynamic topic can't be used beyond this pt */
 	}
-
 	DBGPRINTF("omkafka: kafka outqueue length: %d, callbacks called %d\n",
-		  rd_kafka_outq_len(pData->rk), callbacksCalled);
+			  rd_kafka_outq_len(pData->rk), callbacksCalled);
+
+	if (msg_enqueue_status == -1) {
+		STATSCOUNTER_INC(ctrKafkaFail, mutCtrKafkaFail);
+		ABORT_FINALIZE(RS_RET_KAFKA_PRODUCE_ERR);
+		/* ABORT_FINALIZE isn't absolutely necessary as of now,
+		   because this is the last line anyway, but its useful to ensure
+		   correctness in case we add more stuff below this line at some point*/
+	}
 
 finalize_it:
 	DBGPRINTF("omkafka: writeKafka returned %d\n", iRet);
 	if(iRet != RS_RET_OK) {
 		iRet = RS_RET_SUSPENDED;
 	}
+    STATSCOUNTER_SETMAX_NOMUT(ctrQueueSize, rd_kafka_outq_len(pData->rk));
 	STATSCOUNTER_INC(ctrTopicSubmit, mutCtrTopicSubmit);
 	RETiRet;
 }
@@ -857,6 +879,7 @@ setInstParamDefaults(instanceData *pData)
 	pData->nTopicConfParams = 0;
 	pData->topicConfParams = NULL;
 	pData->errorFile = NULL;
+	pData->key = NULL;
 	pData->closeTimeout = 2000;
 }
 
@@ -912,8 +935,6 @@ CODESTARTnewActInst
 		} else if(!strcmp(actpblk.descr[i].name, "broker")) {
 			es_str_t *es = es_newStr(128);
 			int bNeedComma = 0;
-			CHKmalloc(pData->brokers = malloc(sizeof(char*) *
-			                                  pvals[i].val.d.ar->nmemb ));
 			for(int j = 0 ; j <  pvals[i].val.d.ar->nmemb ; ++j) {
 				if(bNeedComma)
 					es_addChar(&es, ',');
@@ -927,23 +948,31 @@ CODESTARTnewActInst
 			CHKmalloc(pData->confParams = malloc(sizeof(struct kafka_params) *
 			                                      pvals[i].val.d.ar->nmemb ));
 			for(int j = 0 ; j <  pvals[i].val.d.ar->nmemb ; ++j) {
-				CHKiRet(processKafkaParam(es_str2cstr(pvals[i].val.d.ar->arr[j], NULL),
+				char *cstr = es_str2cstr(pvals[i].val.d.ar->arr[j], NULL);
+				CHKiRet(processKafkaParam(cstr,
 							&pData->confParams[j].name,
 							&pData->confParams[j].val));
+				free(cstr);
 			}
 		} else if(!strcmp(actpblk.descr[i].name, "topicconfparam")) {
 			pData->nTopicConfParams = pvals[i].val.d.ar->nmemb;
 			CHKmalloc(pData->topicConfParams = malloc(sizeof(struct kafka_params) *
 			                                      pvals[i].val.d.ar->nmemb ));
 			for(int j = 0 ; j <  pvals[i].val.d.ar->nmemb ; ++j) {
-				CHKiRet(processKafkaParam(es_str2cstr(pvals[i].val.d.ar->arr[j], NULL),
+				char *cstr = es_str2cstr(pvals[i].val.d.ar->arr[j], NULL);
+				CHKiRet(processKafkaParam(cstr,
 							&pData->topicConfParams[j].name,
 							&pData->topicConfParams[j].val));
+				free(cstr);
 			}
 		} else if(!strcmp(actpblk.descr[i].name, "errorfile")) {
 			pData->errorFile = (uchar*)es_str2cstr(pvals[i].val.d.estr, NULL);
+		} else if(!strcmp(actpblk.descr[i].name, "key")) {
+			pData->key = (uchar*)es_str2cstr(pvals[i].val.d.estr, NULL);
 		} else if(!strcmp(actpblk.descr[i].name, "template")) {
 			pData->tplName = (uchar*)es_str2cstr(pvals[i].val.d.estr, NULL);
+		} else if(!strcmp(actpblk.descr[i].name, "reopenOnHup")) {
+			pData->bReopenOnHup = pvals[i].val.d.n;
 		} else {
 			dbgprintf("omkafka: program error, non-handled param '%s'\n", actpblk.descr[i].name);
 		}
@@ -1042,6 +1071,9 @@ CODEmodInit_QueryRegCFSLineHdlr
 	STATSCOUNTER_INIT(ctrTopicSubmit, mutCtrTopicSubmit);
 	CHKiRet(statsobj.AddCounter(kafkaStats, (uchar *)"submitted",
 		ctrType_IntCtr, CTR_FLAG_RESETTABLE, &ctrTopicSubmit));
+    ctrQueueSize = 0;
+    CHKiRet(statsobj.AddCounter(kafkaStats, (uchar *)"maxoutqsize",
+        ctrType_Int, CTR_FLAG_NONE, &ctrQueueSize));
 	STATSCOUNTER_INIT(ctrKafkaFail, mutCtrKafkaFail);
 	CHKiRet(statsobj.AddCounter(kafkaStats, (uchar *)"failures",
 		ctrType_IntCtr, CTR_FLAG_RESETTABLE, &ctrKafkaFail));

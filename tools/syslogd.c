@@ -145,12 +145,10 @@ char **syslogd_crunch_list(char *list)
 
 	/* strip off trailing delimiters */
 	while (p[strlen(p)-1] == LIST_DELIMITER) {
-		count--;
 		p[strlen(p)-1] = '\0';
 	}
 	/* cut off leading delimiters */
 	while (p[0] == LIST_DELIMITER) {
-		count--;
                p++;
 	}
 
@@ -170,7 +168,7 @@ char **syslogd_crunch_list(char *list)
 	 */
 	count = 0;
 	while ((q=strchr(p, LIST_DELIMITER))) {
-		result[count] = (char *) MALLOC((q - p + 1) * sizeof(char));
+		result[count] = (char *) MALLOC(q - p + 1);
 		if (result[count] == NULL) {
 			printf ("Sorry, can't get enough memory, exiting.\n");
 			exit(0); /* safe exit, because only called during startup */
@@ -181,7 +179,7 @@ char **syslogd_crunch_list(char *list)
 		count++;
 	}
 	if ((result[count] = \
-	     (char *)MALLOC(sizeof(char) * strlen(p) + 1)) == NULL) {
+	     (char *)MALLOC(strlen(p) + 1)) == NULL) {
 		printf ("Sorry, can't get enough memory, exiting.\n");
 		exit(0); /* safe exit, because only called during startup */
 	}

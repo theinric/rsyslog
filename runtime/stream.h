@@ -111,6 +111,7 @@ typedef struct strm_s {
 	/* dynamic properties, valid only during file open, not to be persistet */
 	sbool bDisabled; /* should file no longer be written to? (currently set only if omfile file size limit fails) */
 	sbool bSync;	/* sync this file after every write? */
+	sbool bReopenOnTruncate;
 	size_t sIOBufSize;/* size of IO buffer */
 	uchar *pszDir; /* Directory */
 	int lenDir;
@@ -187,12 +188,13 @@ BEGINinterface(strm) /* name must also be changed in ENDinterface macro! */
 	INTERFACEpropSetMeth(strm, sType, strmType_t);
 	INTERFACEpropSetMeth(strm, iZipLevel, int);
 	INTERFACEpropSetMeth(strm, bSync, int);
+	INTERFACEpropSetMeth(strm, bReopenOnTruncate, int);
 	INTERFACEpropSetMeth(strm, sIOBufSize, size_t);
 	INTERFACEpropSetMeth(strm, iSizeLimit, off_t);
 	INTERFACEpropSetMeth(strm, iFlushInterval, int);
 	INTERFACEpropSetMeth(strm, pszSizeLimitCmd, uchar*);
 	/* v6 added */
-	rsRetVal (*ReadLine)(strm_t *pThis, cstr_t **ppCStr, uint8_t mode, sbool bEscapeLF);
+	rsRetVal (*ReadLine)(strm_t *pThis, cstr_t **ppCStr, uint8_t mode, sbool bEscapeLF, uint32_t trimLineOverBytes);
 	/* v7 added  2012-09-14 */
 	INTERFACEpropSetMeth(strm, bVeryReliableZip, int);
 	/* v8 added  2013-03-21 */
@@ -201,8 +203,10 @@ BEGINinterface(strm) /* name must also be changed in ENDinterface macro! */
 	INTERFACEpropSetMeth(strm, cryprov, cryprov_if_t*);
 	INTERFACEpropSetMeth(strm, cryprovData, void*);
 ENDinterface(strm)
-#define strmCURR_IF_VERSION 10 /* increment whenever you change the interface structure! */
+#define strmCURR_IF_VERSION 12 /* increment whenever you change the interface structure! */
 /* V10, 2013-09-10: added new parameter bEscapeLF, changed mode to uint8_t (rgerhards) */
+/* V11, 2015-12-03: added new parameter bReopenOnTruncate */
+/* V12, 2015-12-11: added new parameter trimLineOverBytes, changed mode to uint32_t */
 
 static inline int
 strmGetCurrFileNum(strm_t *pStrm) {

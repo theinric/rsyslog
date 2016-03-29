@@ -2,7 +2,7 @@
  *
  * An implementation of the nsd select() interface for GnuTLS.
  * 
- * Copyright (C) 2008-2012 Adiscon GmbH.
+ * Copyright (C) 2008-2016 Adiscon GmbH.
  *
  * This file is part of the rsyslog runtime library.
  *
@@ -175,7 +175,6 @@ doRetry(nsd_gtls_t *pNsd)
 finalize_it:
 	if(iRet != RS_RET_OK && iRet != RS_RET_CLOSED && iRet != RS_RET_RETRY)
 		pNsd->bAbortConn = 1; /* request abort */
-dbgprintf("XXXXXX: doRetry: iRet %d, pNsd->bAbortConn %d\n", iRet, pNsd->bAbortConn);
 	RETiRet;
 }
 
@@ -198,7 +197,7 @@ IsReady(nsdsel_t *pNsdsel, nsd_t *pNsd, nsdsel_waitOp_t waitOp, int *pbIsReady)
 				   pThis, pThis->iBufferRcvReady);
 			FINALIZE;
 		}
-		if(pNsdGTLS->rtryCall != gtlsRtry_None) {
+		if(pNsdGTLS->rtryCall == gtlsRtry_handshake) {
 			CHKiRet(doRetry(pNsdGTLS));
 			/* we used this up for our own internal processing, so the socket
 			 * is not ready from the upper layer point of view.
@@ -206,6 +205,14 @@ IsReady(nsdsel_t *pNsdsel, nsd_t *pNsd, nsdsel_waitOp_t waitOp, int *pbIsReady)
 			*pbIsReady = 0;
 			FINALIZE;
 		}
+		else if(pNsdGTLS->rtryCall == gtlsRtry_recv) {
+			iRet = doRetry(pNsdGTLS);
+			if(iRet == RS_RET_OK) {
+				*pbIsReady = 0;
+				FINALIZE;
+			}
+		}
+
 		/* now we must ensure that we do not fall back to PTCP if we have
 		 * done a "dummy" select. In that case, we know when the predicate
 		 * is not matched here, we do not have data available for this

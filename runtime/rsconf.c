@@ -122,22 +122,21 @@ static struct cnfparamblk parserpblk =
 /* forward-definitions */
 void cnfDoCfsysline(char *ln);
 
-/* Standard-Constructor
- */
-BEGINobjConstruct(rsconf) /* be sure to specify the object type also in END macro! */
+void cnfSetDefaults(rsconf_t *pThis)
+{
+	pThis->globals.bAbortOnUncleanConfig = 0;
+	pThis->globals.bReduceRepeatMsgs = 0;
 	pThis->globals.bDebugPrintTemplateList = 1;
 	pThis->globals.bDebugPrintModuleList = 0;
 	pThis->globals.bDebugPrintCfSysLineHandlerList = 0;
 	pThis->globals.bLogStatusMsgs = DFLT_bLogStatusMsgs;
 	pThis->globals.bErrMsgToStderr = 1;
 	pThis->globals.umask = -1;
+	pThis->globals.gidDropPrivKeepSupplemental = 0;
 	pThis->templates.root = NULL;
 	pThis->templates.last = NULL;
 	pThis->templates.lastStatic = NULL;
 	pThis->actions.nbrActions = 0;
-	lookupInitCnf(&pThis->lu_tabs);
-	CHKiRet(llInit(&pThis->rulesets.llRulesets, rulesetDestructForLinkedList,
-			rulesetKeyDestruct, strcasecmp));
 	/* queue params */
 	pThis->globals.mainQ.iMainMsgQueueSize = 100000;
 	pThis->globals.mainQ.iMainMsgQHighWtrMark = 80000;
@@ -161,7 +160,17 @@ BEGINobjConstruct(rsconf) /* be sure to specify the object type also in END macr
 	pThis->globals.mainQ.bMainMsgQSaveOnShutdown = 1;
 	pThis->globals.mainQ.iMainMsgQueueDeqtWinFromHr = 0;
 	pThis->globals.mainQ.iMainMsgQueueDeqtWinToHr = 25;
-	/* end queue params */
+}
+
+
+/* Standard-Constructor
+ */
+BEGINobjConstruct(rsconf) /* be sure to specify the object type also in END macro! */
+	cnfSetDefaults(pThis);
+	lookupInitCnf(&pThis->lu_tabs);
+	CHKiRet(dynstats_initCnf(&pThis->dynstats_buckets));
+	CHKiRet(llInit(&pThis->rulesets.llRulesets, rulesetDestructForLinkedList,
+			rulesetKeyDestruct, strcasecmp));
 finalize_it:
 ENDobjConstruct(rsconf)
 
@@ -201,8 +210,10 @@ BEGINobjDestruct(rsconf) /* be sure to specify the object type also in END and C
 CODESTARTobjDestruct(rsconf)
 	freeCnf(pThis);
 	tplDeleteAll(pThis);
+	dynstats_destroyAllBuckets();
 	free(pThis->globals.mainQ.pszMainMsgQFName);
 	free(pThis->globals.pszConfDAGFile);
+	lookupDestroyCnf();
 	llDestroy(&(pThis->rulesets.llRulesets));
 ENDobjDestruct(rsconf)
 
@@ -417,7 +428,10 @@ void cnfDoObj(struct cnfobj *o)
 		inputProcessCnf(o);
 		break;
 	case CNFOBJ_LOOKUP_TABLE:
-		lookupProcessCnf(o);
+		lookupTableDefProcessCnf(o);
+		break;
+	case CNFOBJ_DYN_STATS:
+		dynstats_processCnf(o);
 		break;
 	case CNFOBJ_PARSER:
 		parserProcessCnf(o);
@@ -485,29 +499,37 @@ void cnfDoBSDHost(char *ln)
 
 /* drop to specified group
  * if something goes wrong, the function never returns
- * Note that such an abort can cause damage to on-disk structures, so we should
- * re-design the "interface" in the long term. -- rgerhards, 2008-11-26
  */
-static void doDropPrivGid(int iGid)
+static
+rsRetVal doDropPrivGid(void)
 {
 	int res;
 	uchar szBuf[1024];
+	DEFiRet;
 
-	res = setgroups(0, NULL); /* remove all supplementary group IDs */
-	if(res) {
-		perror("could not remove supplemental group IDs");
-		exit(1);
+	if(!ourConf->globals.gidDropPrivKeepSupplemental) {
+		res = setgroups(0, NULL); /* remove all supplemental group IDs */
+		if(res) {
+			rs_strerror_r(errno, (char*)szBuf, sizeof(szBuf));
+			errmsg.LogError(0, RS_RET_ERR_DROP_PRIV,
+					"could not remove supplemental group IDs: %s", szBuf);
+			ABORT_FINALIZE(RS_RET_ERR_DROP_PRIV);
+		}
+		DBGPRINTF("setgroups(0, NULL): %d\n", res);
 	}
-	DBGPRINTF("setgroups(0, NULL): %d\n", res);
-	res = setgid(iGid);
+	res = setgid(ourConf->globals.gidDropPriv);
 	if(res) {
-		/* if we can not set the userid, this is fatal, so let's unconditionally abort */
-		perror("could not set requested group id");
-		exit(1);
+		rs_strerror_r(errno, (char*)szBuf, sizeof(szBuf));
+		errmsg.LogError(0, RS_RET_ERR_DROP_PRIV,
+				"could not set requested group id: %s", szBuf);
+		ABORT_FINALIZE(RS_RET_ERR_DROP_PRIV);
 	}
-	DBGPRINTF("setgid(%d): %d\n", iGid, res);
-	snprintf((char*)szBuf, sizeof(szBuf)/sizeof(uchar), "rsyslogd's groupid changed to %d", iGid);
+	DBGPRINTF("setgid(%d): %d\n", ourConf->globals.gidDropPriv, res);
+	snprintf((char*)szBuf, sizeof(szBuf), "rsyslogd's groupid changed to %d",
+		 ourConf->globals.gidDropPriv);
 	logmsgInternal(NO_ERRCODE, LOG_SYSLOG|LOG_INFO, szBuf, 0);
+finalize_it:
+	RETiRet;
 }
 
 
@@ -545,7 +567,7 @@ static void doDropPrivUid(int iUid)
 		exit(1);
 	}
 	DBGPRINTF("setuid(%d): %d\n", iUid, res);
-	snprintf((char*)szBuf, sizeof(szBuf)/sizeof(uchar), "rsyslogd's userid changed to %d", iUid);
+	snprintf((char*)szBuf, sizeof(szBuf), "rsyslogd's userid changed to %d", iUid);
 	logmsgInternal(NO_ERRCODE, LOG_SYSLOG|LOG_INFO, szBuf, 0);
 }
 
@@ -561,7 +583,7 @@ dropPrivileges(rsconf_t *cnf)
 	DEFiRet;
 
 	if(cnf->globals.gidDropPriv != 0) {
-		doDropPrivGid(ourConf->globals.gidDropPriv);
+		CHKiRet(doDropPrivGid());
 		DBGPRINTF("group privileges have been dropped to gid %u\n", (unsigned) 
 			  ourConf->globals.gidDropPriv);
 	}
@@ -572,6 +594,7 @@ dropPrivileges(rsconf_t *cnf)
 			  ourConf->globals.uidDropPriv);
 	}
 
+finalize_it:
 	RETiRet;
 }
 
@@ -967,33 +990,9 @@ finalize_it:
 /* legacy config system: reset config variables to default values.  */
 static rsRetVal resetConfigVariables(uchar __attribute__((unused)) *pp, void __attribute__((unused)) *pVal)
 {
-	loadConf->globals.bLogStatusMsgs = DFLT_bLogStatusMsgs;
-	loadConf->globals.bDebugPrintTemplateList = 1;
-	loadConf->globals.bDebugPrintCfSysLineHandlerList = 1;
-	loadConf->globals.bDebugPrintModuleList = 1;
-	loadConf->globals.bAbortOnUncleanConfig = 0;
-	loadConf->globals.bReduceRepeatMsgs = 0;
 	free(loadConf->globals.mainQ.pszMainMsgQFName);
-	loadConf->globals.mainQ.pszMainMsgQFName = NULL;
-	loadConf->globals.mainQ.iMainMsgQueueSize = 10000;
-	loadConf->globals.mainQ.iMainMsgQHighWtrMark = 8000;
-	loadConf->globals.mainQ.iMainMsgQLowWtrMark = 2000;
-	loadConf->globals.mainQ.iMainMsgQDiscardMark = 9800;
-	loadConf->globals.mainQ.iMainMsgQDiscardSeverity = 8;
-	loadConf->globals.mainQ.iMainMsgQueMaxFileSize = 1024 * 1024;
-	loadConf->globals.mainQ.iMainMsgQueueNumWorkers = 1;
-	loadConf->globals.mainQ.iMainMsgQPersistUpdCnt = 0;
-	loadConf->globals.mainQ.bMainMsgQSyncQeueFiles = 0;
-	loadConf->globals.mainQ.iMainMsgQtoQShutdown = 1500;
-	loadConf->globals.mainQ.iMainMsgQtoActShutdown = 1000;
-	loadConf->globals.mainQ.iMainMsgQtoEnq = 2000;
-	loadConf->globals.mainQ.iMainMsgQtoWrkShutdown = 60000;
-	loadConf->globals.mainQ.iMainMsgQWrkMinMsgs = 100;
-	loadConf->globals.mainQ.iMainMsgQDeqSlowdown = 0;
-	loadConf->globals.mainQ.bMainMsgQSaveOnShutdown = 1;
-	loadConf->globals.mainQ.MainMsgQueType = QUEUETYPE_FIXED_ARRAY;
-	loadConf->globals.mainQ.iMainMsgQueMaxDiskSpace = 0;
-	loadConf->globals.mainQ.iMainMsgQueDeqBatchSize = 32;
+
+	cnfSetDefaults(loadConf);
 
 	return RS_RET_OK;
 }
@@ -1020,7 +1019,7 @@ regBuildInModule(rsRetVal (*modInit)(), uchar *name, void *pModHdlr)
 	DEFiRet;
 	CHKiRet(module.doModInit(modInit, name, pModHdlr, &pMod));
 	readyModForCnf(pMod, &pNew, &pLast);
-	addModToCnfList(pNew, pLast);
+	addModToCnfList(&pNew, pLast);
 finalize_it:
 	RETiRet;
 }
@@ -1118,7 +1117,7 @@ initLegacyConf(void)
 		NULL, &loadConf->globals.uidDropPriv, NULL));
 	CHKiRet(regCfSysLineHdlr((uchar *)"privdroptogroup", 0, eCmdHdlrGID,
 		NULL, &loadConf->globals.gidDropPriv, NULL));
-	CHKiRet(regCfSysLineHdlr((uchar *)"privdroptogroupid", 0, eCmdHdlrGID,
+	CHKiRet(regCfSysLineHdlr((uchar *)"privdroptogroupid", 0, eCmdHdlrInt,
 		NULL, &loadConf->globals.gidDropPriv, NULL));
 	CHKiRet(regCfSysLineHdlr((uchar *)"generateconfiggraph", 0, eCmdHdlrGetWord,
 		NULL, &loadConf->globals.pszConfDAGFile, NULL));
@@ -1281,7 +1280,7 @@ validateConf(void)
 rsRetVal
 load(rsconf_t **cnf, uchar *confFile)
 {
-	int iNbrActions;
+	int iNbrActions = 0;
 	int r;
 	DEFiRet;
 

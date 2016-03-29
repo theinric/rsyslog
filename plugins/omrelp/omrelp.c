@@ -16,7 +16,7 @@
  *
  * File begun on 2008-03-13 by RGerhards
  *
- * Copyright 2008-2014 Adiscon GmbH.
+ * Copyright 2008-2016 Adiscon GmbH.
  *
  * This file is part of rsyslog.
  *
@@ -53,6 +53,10 @@
 #include "errmsg.h"
 #include "debug.h"
 #include "unicode-helper.h"
+
+#ifndef RELP_DFLT_PT
+#	define RELP_DFLT_PT "514"
+#endif
 
 MODULE_TYPE_OUTPUT
 MODULE_TYPE_NOKEEP
@@ -143,7 +147,7 @@ static uchar *getRelpPt(instanceData *pData)
 {
 	assert(pData != NULL);
 	if(pData->port == NULL)
-		return((uchar*)"514");
+		return((uchar*)RELP_DFLT_PT);
 	else
 		return(pData->port);
 }
@@ -259,8 +263,10 @@ CODESTARTfreeInstance
 	free(pData->caCertFile);
 	free(pData->myCertFile);
 	free(pData->myPrivKeyFile);
-	for(i = 0 ; i <  pData->permittedPeers.nmemb ; ++i) {
-		free(pData->permittedPeers.name[i]);
+	if(pData->permittedPeers.name != NULL) {
+		for(i = 0 ; i <  pData->permittedPeers.nmemb ; ++i) {
+			free(pData->permittedPeers.name[i]);
+		}
 	}
 ENDfreeInstance
 
@@ -290,6 +296,7 @@ setInstParamDefaults(instanceData *pData)
 	pData->caCertFile = NULL;
 	pData->myCertFile = NULL;
 	pData->myPrivKeyFile = NULL;
+	pData->permittedPeers.name = NULL;
 	pData->permittedPeers.nmemb = 0;
 }
 
@@ -340,7 +347,7 @@ CODESTARTnewActInst
 			pData->permittedPeers.nmemb = pvals[i].val.d.ar->nmemb;
 			CHKmalloc(pData->permittedPeers.name =
 				malloc(sizeof(uchar*) * pData->permittedPeers.nmemb));
-			for(j = 0 ; j <  pvals[i].val.d.ar->nmemb ; ++j) {
+			for(j = 0 ; j <  pData->permittedPeers.nmemb ; ++j) {
 				pData->permittedPeers.name[j] = (uchar*)es_str2cstr(pvals[i].val.d.ar->arr[j], NULL);
 			}
 		} else {
@@ -388,7 +395,7 @@ static rsRetVal doConnect(wrkrInstanceData_t *pWrkrData)
 
 	if(pWrkrData->bInitialConnect) {
 		iRet = relpCltConnect(pWrkrData->pRelpClt, glbl.GetDefPFFamily(),
-				      pWrkrData->pData->port, pWrkrData->pData->target);
+				      getRelpPt(pWrkrData->pData), pWrkrData->pData->target);
 		if(iRet == RELP_RET_OK)
 			pWrkrData->bInitialConnect = 0;
 	} else {
@@ -442,7 +449,7 @@ finalize_it:
 
 BEGINbeginTransaction
 CODESTARTbeginTransaction
-dbgprintf("omrelp: beginTransaction\n");
+	DBGPRINTF("omrelp: beginTransaction\n");
 	if(!pWrkrData->bIsConnected) {
 		CHKiRet(doConnect(pWrkrData));
 	}

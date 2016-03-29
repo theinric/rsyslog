@@ -26,6 +26,7 @@ EXTRA_DIST = \
 	platform/slackware/rc.rsyslogd \
 	platform/redhat/rsyslog.conf \
 	contrib/README \
+	CONTRIBUTING.md \
 	COPYING \
 	COPYING.LESSER \
 	COPYING.ASL20 \
@@ -100,6 +101,10 @@ endif
 
 if ENABLE_PMSNARE
 SUBDIRS += contrib/pmsnare
+endif
+
+if ENABLE_PMPANNGFW
+SUBDIRS += contrib/pmpanngfw
 endif
 
 if ENABLE_PMLASTMSG
@@ -202,6 +207,10 @@ if ENABLE_MMJSONPARSE
 SUBDIRS += plugins/mmjsonparse
 endif
 
+if ENABLE_MMGROK
+SUBDIRS += contrib/mmgrok
+endif
+
 if ENABLE_MMAUDIT
 SUBDIRS += plugins/mmaudit
 endif
@@ -239,6 +248,16 @@ if ENABLE_OMHTTPFS
 SUBDIRS += contrib/omhttpfs
 endif
 
+# omamqp1
+if ENABLE_OMAMQP1
+SUBDIRS += contrib/omamqp1
+endif
+
+# mmkubernetes
+if ENABLE_MMKUBERNETES
+SUBDIRS += contrib/mmkubernetes
+endif
+
 # tests are added as last element, because tests may need different
 # modules that need to be generated first
 SUBDIRS += tests
@@ -253,7 +272,8 @@ SUBDIRS += tests
 # when some global update happened.
 DISTCHECK_CONFIGURE_FLAGS= \
 	--disable-silent-rules \
-	--disable-testbench
+	--disable-testbench \
+	--with-systemdsystemunitdir=$$dc_install_base/$(systemdsystemunitdir) 
 
 THIS_IS_TEMPORARILY_DISABLED = \
 	--enable-distcheck-workaround \
@@ -269,6 +289,7 @@ THIS_IS_TEMPORARILY_DISABLED = \
 	--enable-mail \
 	--enable-klog \
 	--enable-diagtools \
+	--enable-mmgrok \
 	--enable-gnutls \
 	--enable-omstdout \
 	--enable-pmlastmsg \

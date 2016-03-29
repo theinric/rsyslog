@@ -412,7 +412,7 @@ StartDA(qqueue_t *pThis)
 	CHKiRet(qqueueConstruct(&pThis->pqDA, QUEUETYPE_DISK , 1, 0, pThis->pConsumer));
 
 	/* give it a name */
-	snprintf((char*) pszDAQName, sizeof(pszDAQName)/sizeof(uchar), "%s[DA]", obj.GetName((obj_t*) pThis));
+	snprintf((char*) pszDAQName, sizeof(pszDAQName), "%s[DA]", obj.GetName((obj_t*) pThis));
 	obj.SetName((obj_t*) pThis->pqDA, pszDAQName);
 
 	/* as the created queue is the same object class, we take the
@@ -743,6 +743,7 @@ qqueueLoadPersStrmInfoFixup(strm_t *pStrm, qqueue_t __attribute__((unused)) *pTh
 	ISOBJ_TYPE_assert(pStrm, strm);
 	ISOBJ_TYPE_assert(pThis, qqueue);
 	CHKiRet(strm.SetDir(pStrm, pThis->pszSpoolDir, pThis->lenSpoolDir));
+	CHKiRet(strm.SetbSync(pStrm, pThis->bSyncQueueFiles));
 finalize_it:
 	RETiRet;
 }
@@ -2118,7 +2119,7 @@ qqueueStart(qqueue_t *pThis) /* this is the ConstructionFinalizer */
 			/* special handling */
 			pThis->iNumWorkerThreads = 1; /* we need exactly one worker */
 			/* pre-construct file name for .qi file */
-			pThis->lenQIFNam = snprintf((char*)pszQIFNam, sizeof(pszQIFNam) / sizeof(uchar),
+			pThis->lenQIFNam = snprintf((char*)pszQIFNam, sizeof(pszQIFNam),
 				"%s/%s.qi", (char*) pThis->pszSpoolDir, (char*)pThis->pszFilePrefix);
 			pThis->pszQIFNam = ustrdup(pszQIFNam);
 			DBGOPRINT((obj_t*) pThis, ".qi file name is '%s', len %d\n", pThis->pszQIFNam,
@@ -2444,7 +2445,7 @@ finalize_it:
  * nUpdates is the number of updates since the last call to this function.
  * It may be > 1 due to batches. -- rgerhards, 2009-05-12
  */
-static rsRetVal qqueueChkPersist(qqueue_t *pThis, int nUpdates)
+static rsRetVal qqueueChkPersist(qqueue_t *const pThis, const int nUpdates)
 {
 	DEFiRet;
 	ISOBJ_TYPE_assert(pThis, qqueue);
@@ -2626,7 +2627,7 @@ qqueueSetFilePrefix(qqueue_t *pThis, uchar *pszPrefix, size_t iLenPrefix)
 	if(pszPrefix == NULL) /* just unset the prefix! */
 		ABORT_FINALIZE(RS_RET_OK);
 
-	if((pThis->pszFilePrefix = MALLOC(sizeof(uchar) * iLenPrefix + 1)) == NULL)
+	if((pThis->pszFilePrefix = MALLOC(iLenPrefix + 1)) == NULL)
 		ABORT_FINALIZE(RS_RET_OUT_OF_MEMORY);
 	memcpy(pThis->pszFilePrefix, pszPrefix, iLenPrefix + 1);
 	pThis->lenFilePrefix = iLenPrefix;
@@ -2848,10 +2849,11 @@ qqueueEnqMsg(qqueue_t *pThis, flowControl_t flowCtlType, msg_t *pMsg)
 {
 	DEFiRet;
 	int iCancelStateSave;
-
 	ISOBJ_TYPE_assert(pThis, qqueue);
 
-	if(pThis->qType != QUEUETYPE_DIRECT) {
+	const int isNonDirectQ = pThis->qType != QUEUETYPE_DIRECT;
+
+	if(isNonDirectQ) {
 		pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &iCancelStateSave);
 		d_pthread_mutex_lock(pThis->mut);
 	}
@@ -2861,7 +2863,7 @@ qqueueEnqMsg(qqueue_t *pThis, flowControl_t flowCtlType, msg_t *pMsg)
 	qqueueChkPersist(pThis, 1);
 
 finalize_it:
-	if(pThis->qType != QUEUETYPE_DIRECT) {
+	if(isNonDirectQ) {
 		/* make sure at least one worker is running. */
 		qqueueAdviseMaxWorkers(pThis);
 		/* and release the mutex */

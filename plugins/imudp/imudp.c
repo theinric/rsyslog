@@ -4,7 +4,7 @@
  * NOTE: read comments in module-template.h to understand how this file
  *       works!
  *
- * Copyright 2007-2014 Rainer Gerhards and Adiscon GmbH.
+ * Copyright 2007-2015 Rainer Gerhards and Adiscon GmbH.
  *
  * This file is part of rsyslog.
  *
@@ -189,7 +189,7 @@ static struct cnfparamblk inppblk =
 
 #include "im-helper.h" /* must be included AFTER the type definitions! */
 
-/* create input instance, set default paramters, and
+/* create input instance, set default parameters, and
  * add it to the list of instances.
  */
 static rsRetVal
@@ -417,7 +417,7 @@ processPacket(struct lstn_s *lstn, struct sockaddr_storage *frominetPrev, int *p
 		*pbIsPermitted = 1; /* no check -> everything permitted */
 	}
 
-	DBGPRINTF("recv(%d,%d),acl:%d,msg:%.128s\n", lstn->sock, (int) lenRcvBuf, *pbIsPermitted, rcvBuf);
+	DBGPRINTF("recv(%d,%d),acl:%d,msg:%.*s\n", lstn->sock, (int) lenRcvBuf, *pbIsPermitted, (int)lenRcvBuf, rcvBuf);
 
 	if(*pbIsPermitted != 0)  {
 		/* we now create our own message object and submit it to the queue */
@@ -459,7 +459,9 @@ processSocket(struct wrkrInfo_s *pWrkr, struct lstn_s *lstn, struct sockaddr_sto
 {
 	DEFiRet;
 	int iNbrTimeUsed;
-	time_t ttGenTime;
+	time_t ttGenTime = 0; /* to avoid clang static analyzer false positive */
+		/* note: we do never use this time, because we always get a 
+		 * requery below on first loop iteration */
 	struct syslogTime stTime;
 	char errStr[1024];
 	msg_t *pMsgs[CONF_NUM_MULTISUB];
@@ -507,7 +509,7 @@ processSocket(struct wrkrInfo_s *pWrkr, struct lstn_s *lstn, struct sockaddr_sto
 		}
 
 		if((runModConf->iTimeRequery == 0) || (iNbrTimeUsed++ % runModConf->iTimeRequery) == 0) {
-			datetime.getCurrTime(&stTime, &ttGenTime);
+			datetime.getCurrTime(&stTime, &ttGenTime, TIME_IN_LOCALTIME);
 		}
 
 		pWrkr->ctrMsgsRcvd += nelem;
@@ -580,7 +582,7 @@ processSocket(struct wrkrInfo_s *pWrkr, struct lstn_s *lstn, struct sockaddr_sto
 
 		++pWrkr->ctrMsgsRcvd;
 		if((runModConf->iTimeRequery == 0) || (iNbrTimeUsed++ % runModConf->iTimeRequery) == 0) {
-			datetime.getCurrTime(&stTime, &ttGenTime);
+			datetime.getCurrTime(&stTime, &ttGenTime, TIME_IN_LOCALTIME);
 		}
 
 		CHKiRet(processPacket(lstn, frominetPrev, pbIsPermitted, pWrkr->pRcvBuf, lenRcvBuf, &stTime,
@@ -747,6 +749,13 @@ rsRetVal rcvMainLoop(struct wrkrInfo_s *pWrkr)
 	nLstn = 0;
 	for(lstn = lcnfRoot ; lstn != NULL ; lstn = lstn->next)
 		++nLstn;
+
+	if(nLstn == 0) {
+		errmsg.LogError(errno, RS_RET_ERR,
+			"imudp error: we have 0 listeners, terminating"
+			"worker thread");
+		ABORT_FINALIZE(RS_RET_ERR);
+	}
 	CHKmalloc(udpEPollEvt = calloc(nLstn, sizeof(struct epoll_event)));
 
 #if defined(EPOLL_CLOEXEC) && defined(HAVE_EPOLL_CREATE1)
@@ -881,14 +890,14 @@ createListner(es_str_t *port, struct cnfparamvals *pvals)
 		} else if(!strcmp(inppblk.descr[i].name, "name")) {
 			if(inst->inputname != NULL) {
 				errmsg.LogError(0, RS_RET_INVALID_PARAMS, "imudp: name and inputname "
-						"paramter specified - only one can be used");
+						"parameter specified - only one can be used");
 				ABORT_FINALIZE(RS_RET_INVALID_PARAMS);
 			}
 			inst->inputname = (uchar*)es_str2cstr(pvals[i].val.d.estr, NULL);
 		} else if(!strcmp(inppblk.descr[i].name, "name.appendport")) {
 			if(bAppendPortUsed) {
 				errmsg.LogError(0, RS_RET_INVALID_PARAMS, "imudp: name.appendport and "
-						"inputname.appendport paramter specified - only one can be used");
+						"inputname.appendport parameter specified - only one can be used");
 				ABORT_FINALIZE(RS_RET_INVALID_PARAMS);
 			}
 			inst->bAppendPortToInpname = (int) pvals[i].val.d.n;
@@ -1096,7 +1105,7 @@ BEGINactivateCnf
 CODESTARTactivateCnf
 	/* caching various settings */
 	iMaxLine = glbl.GetMaxLine();
-	lenRcvBuf = (iMaxLine + 1) * sizeof(char);
+	lenRcvBuf = iMaxLine + 1;
 #	ifdef HAVE_RECVMMSG
 	lenRcvBuf *= runModConf->batchSize;
 #	endif

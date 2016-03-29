@@ -49,7 +49,6 @@
 
 MODULE_TYPE_OUTPUT
 MODULE_TYPE_NOKEEP
-MODULE_CNFNAME("ompgsql")
 
 /* internal structures
  */
@@ -145,7 +144,7 @@ static void reportDBError(instanceData *pData, int bSilent)
 		errmsg.LogError(0, NO_ERRCODE, "unknown DB error occured - could not obtain PgSQL handle");
 	} else { /* we can ask pgsql for the error description... */
 		ePgSQLStatus = PQstatus(pData->f_hpgsql);
-		snprintf(errMsg, sizeof(errMsg)/sizeof(char), "db error (%d): %s\n", ePgSQLStatus,
+		snprintf(errMsg, sizeof(errMsg), "db error (%d): %s\n", ePgSQLStatus,
 				PQerrorMessage(pData->f_hpgsql));
 		if(bSilent || ePgSQLStatus == pData->eLastPgSQLStatus)
 			dbgprintf("pgsql, DBError(silent): %s\n", errMsg);
@@ -233,6 +232,7 @@ writePgSQL(uchar *psz, instanceData *pData)
 	bHadError = tryExec(psz, pData); /* try insert */
 
 	if(bHadError || (PQstatus(pData->f_hpgsql) != CONNECTION_OK)) {
+#if 0		/* re-enable once we have transaction support */
 		/* error occured, try to re-init connection and retry */
 		int inTransaction = 0;
 		if(pData->f_hpgsql != NULL) {
@@ -241,7 +241,9 @@ writePgSQL(uchar *psz, instanceData *pData)
 				inTransaction = 1;
 			}
 		}
-		if ( inTransaction == 0 ) {
+		if ( inTransaction == 0 )
+#endif
+		{
 			closePgSQL(pData); /* close the current handle */
 			CHKiRet(initPgSQL(pData, 0)); /* try to re-open */
 			bHadError = tryExec(psz, pData); /* retry */
@@ -281,6 +283,7 @@ CODESTARTtryResume
 ENDtryResume
 
 
+#if 0 /* re-enable when TX support is added again */
 BEGINbeginTransaction
 CODESTARTbeginTransaction
 	dbgprintf("ompgsql: beginTransaction\n");
@@ -288,6 +291,7 @@ CODESTARTbeginTransaction
 	       initPgSQL(pWrkrData->pData, 0);
 	iRet = writePgSQL((uchar*) "begin", pWrkrData->pData); /* TODO: make user-configurable */
 ENDbeginTransaction
+#endif
 
 
 BEGINdoAction
@@ -302,11 +306,12 @@ finalize_it:
 ENDdoAction
 
 
+#if 0 /* re-enable when TX support is added again */
 BEGINendTransaction
 CODESTARTendTransaction
 	iRet = writePgSQL((uchar*) "commit;", pWrkrData->pData); /* TODO: make user-configurable */
-dbgprintf("ompgsql: endTransaction\n");
 ENDendTransaction
+#endif
 
 
 BEGINparseSelectorAct
@@ -385,7 +390,7 @@ BEGINqueryEtryPt
 CODESTARTqueryEtryPt
 CODEqueryEtryPt_STD_OMOD_QUERIES
 CODEqueryEtryPt_STD_OMOD8_QUERIES
-CODEqueryEtryPt_TXIF_OMOD_QUERIES /* we support the transactional interface! */
+/* CODEqueryEtryPt_TXIF_OMOD_QUERIES currently no TX support! */ /* we support the transactional interface! */
 ENDqueryEtryPt
 
 
@@ -397,7 +402,7 @@ CODEmodInit_QueryRegCFSLineHdlr
 	CHKiRet(objUse(errmsg, CORE_COMPONENT));
 	INITChkCoreFeature(bCoreSupportsBatching, CORE_FEATURE_BATCHING);
 
-#	warning: transaction support missing for v8
+	/* TODO: transaction support missing for v8 */
 	bCoreSupportsBatching= 0;
 	DBGPRINTF("ompgsql: transactions are not yet supported on v8\n");
 

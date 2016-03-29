@@ -202,6 +202,10 @@ processJSON(wrkrInstanceData_t *pWrkrData, msg_t *pMsg, char *buf, size_t lenBuf
 	if(json == NULL
 	   || ((size_t)pWrkrData->tokener->char_offset < lenBuf)
 	   || (!json_object_is_type(json, json_type_object))) {
+		if(json != NULL) {
+			/* Release json object as we are not going to add it to pMsg */
+			json_object_put(json);
+		}
 		ABORT_FINALIZE(RS_RET_NO_CEE_MSG);
 	}
  
@@ -210,8 +214,9 @@ finalize_it:
 	RETiRet;
 }
 
-BEGINdoAction
-	msg_t *pMsg;
+BEGINdoAction_NoStrings
+	msg_t **ppMsg = (msg_t **) pMsgData;
+	msg_t *pMsg = ppMsg[0];
 	uchar *buf;
 	rs_size_t len;
 	int bSuccess = 0;
@@ -220,7 +225,6 @@ BEGINdoAction
 	instanceData *pData;
 CODESTARTdoAction
 	pData = pWrkrData->pData;
-	pMsg = (msg_t*) ppString[0];
 	/* note that we can performance-optimize the interface, but this also
 	 * requires changes to the libraries. For now, we accept message
 	 * duplication. -- rgerhards, 2010-12-01
@@ -256,7 +260,6 @@ ENDdoAction
 static inline void
 setInstParamDefaults(instanceData *pData)
 {
-	pData->cookie = NULL;
 	pData->bUseRawMsg = 0;
 }
 
@@ -293,8 +296,6 @@ CODESTARTnewActInst
 
 	if(pData->container == NULL)
 		CHKmalloc(pData->container = (uchar*) strdup("!"));
-	if(pData->cookie == NULL)
-		CHKmalloc(pData->cookie = strdup("@cee:"));
 	pData->lenCookie = strlen(pData->cookie);
 CODE_STD_FINALIZERnewActInst
 	cnfparamvalsDestruct(pvals, &actpblk);

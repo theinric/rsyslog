@@ -87,7 +87,7 @@ CODESTARTisCompatibleWithFeature
 ENDisCompatibleWithFeature
 
 
-/* create input instance, set default paramters, and
+/* create input instance, set default parameters, and
  * add it to the list of instances.
  */
 static rsRetVal
@@ -109,6 +109,7 @@ BEGINnewParserInst
 CODESTARTnewParserInst
 	DBGPRINTF("newParserInst (pmrfc3164)\n");
 
+	inst = NULL;
 	CHKiRet(createInstance(&inst));
 
 	if(lst == NULL)
@@ -139,6 +140,8 @@ finalize_it:
 CODE_STD_FINALIZERnewParserInst
 	if(lst != NULL)
 		cnfparamvalsDestruct(pvals, &parserpblk);
+	if(iRet != RS_RET_OK)
+		free(inst);
 ENDnewParserInst
 
 

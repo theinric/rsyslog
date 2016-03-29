@@ -1,6 +1,500 @@
 ------------------------------------------------------------------------------
+Version 8.18.0 [v8-stable] 2016-04-19
+- templates: add option to convert timestamps to UTC
+  closes https://github.com/rsyslog/rsyslog/issues/730
+- omjournal: fix segfault (regression in 8.17.0)
+- imptcp: added AF_UNIX support
+  Thanks to Nathan Brown for implementing this feature.
+- new template options
+  * compressSpace
+  * date-utc
+- redis: support for authentication
+  Thanks to Manohar Ht for the patch
+- omkafka: makes kafka-producer on-HUP restart optional 
+  As of now, omkafka kills and re-creates kafka-producer on HUP. This
+  is not always desirable. This change introduces an action param
+  (reopenOnHup="on|off") which allows user to control re-cycling of
+  kafka-producer.
+  It defaults to on (for backward compatibility). Off allows user to
+  ignore HUP as far as kafka-producer is concerned.
+  Thanks to Janmejay Singh for implementing this feature
+- testbench improvements (more tests and more thourough tests)
+  among others:
+  - tests for omjournal added
+  - tests for KSI subsystem
+  - tests for priviledge drop statements
+- improvements to the CI environment
+- bugfix: $PrivDropToGroupID actually did a name lookup
+  ... instead of using the provided ID
+- bugfix: small memory leak in imfile
+  Thanks to Tomas Heinrich for the patch.
+- bugfix: double free in jsonmesg template
+  There has to be actual json data in the message (from mmjsonparse,
+  mmnormalize, imjournal, ...) to trigger the crash.
+  Thanks to Tomas Heinrich for the patch.
+- bugfix: incorrect formatting of stats when CEE/Json format is used
+  This lead to ill-formed json being generated
+- bugfix: memory leaks in logctl utility
+  Detected by clang static analyzer. Note that these leaks CAN happen in
+  practice and may even be pretty large. This was probably never detected
+  because the tool is not often used.
+- bugfix omrelp: fix segfault if no port action parameter was given
+  closes https://github.com/rsyslog/rsyslog/issues/911
+------------------------------------------------------------------------------
+Version 8.17.0 [v8-stable] 2016-03-08
+- NEW REQUIREMENT: libfastjson
+  see also:
+  http://blog.gerhards.net/2015/12/rsyslog-and-liblognorm-will-switch-to.html
+- new testbench requirement: faketime command line tool
+  This is used to generate a controlled environment for time-based tests; if
+  not available, tests will gracefully be skipped.
+- improve json variable performance
+  We use libfastjson's alternative hash function, which has been
+  proven to be much faster than the default one (which stems
+  back to libjson-c). This should bring an overall performance
+  improvement for all operations involving variable processing.
+  closes https://github.com/rsyslog/rsyslog/issues/848
+- new experimental feature: lookup table suport
+  Note that at this time, this is an experimental feature which is not yet
+  fully supported by the rsyslog team. It is introduced in order to gain
+  more feedback and to make it available as early as possible because many
+  people consider it useful.
+  Thanks to Janmejay Singh for implementing this feature
+- new feature: dynamic statistics counters
+  which may be changed during rule processing
+  Thanks to Janmejay Singh for suggesting and implementing this feature
+- new contributed plugin: omampq1 for AMQP 1.0-compliant brokers
+  Thanks to Ken Giusti for this module
+- new set of UTC-based $now family of variables ($now-utc, $year-utc, ...)
+- simplified locking when accessing message and local variables
+  this simlifies the code and slightly increases performance if such
+  variables are heavily accessed.
+- new global parameter "debug.unloadModules"
+  This permits to disable unloading of modules, e.g.  to make valgrind
+  reports more useful (without a need to recompile).
+- timestamp handling: guard against invalid dates
+  We do not permit dates outside of the year 1970..2100
+  interval. Note that network-receivers do already guard
+  against this, so the new guard only guards against invalid
+  system time.
+- imfile: add "trimlineoverbytes" input paramter
+  Thanks to github user JindongChen for the patch.
+- ommongodb: add support for extended json format for dates
+  Thanks to Florian Bücklers for the patch.
+- omjournal: add support for templates
+  see also: https://github.com/rsyslog/rsyslog/pull/770
+  Thanks to github user bobthemighty for the patch
+- imuxsock: add "ruleset" input parameter
+- testbench: framework improvement: configs can be included in test file
+  they do no longer need to be in a separate file, which saves a bit
+  of work when working with them. This is supported for simple tests with
+  a single running rsyslog instance
+  Thanks to Janmejay Singh for inspiring me with a similar method in
+  liblognorm testbench.
+- imptcp: performance improvements
+  Thanks to Janmejay Singh for implementing this improvement
+- made build compile (almost) without warnings
+  still some warnings are suppressed where this is currently required
+- improve interface definition in some modules, e.g. mmanon, mmsequence
+  This is more an internal cleanup and should have no actual affect to
+  the end user.
+- solaris build: MAXHOSTNAMELEN properly detected
+- build system improvement: ability to detect old hiredis libs
+  This permits to automatically build omhiredis on systems where the
+  hiredis libs do not provide a pkgconfig file. Previsouly, this
+  required manual configuration.
+  Thanks to github user jaymell for the patch.
+- rsgtutil: dump mode improvements
+  * auto-detect signature file type
+  * ability to dump hash chains for log extraction files
+- build system: fix build issues with clang
+  clang builds often failed with a missing external symbol
+  "rpl_malloc". This was caused by checks in configure.ac,
+  which checked for specific GNU semantics. As we do not need
+  them (we never ask malloc for zero bytes), we can safely
+  remove the macros.
+  Note that we routinely run clang static analyer in CI and
+  it also detects such calls as invalid.
+  closes https://github.com/rsyslog/rsyslog/issues/834
+- bugfix: unixtimestamp date format was incorrectly computed
+  The problem happened in leap year from March til then end
+  of year and healed itself at the begining of the next year.
+  During the problem period, the timestamp was 24 hours too low.
+  fixes https://github.com/rsyslog/rsyslog/issues/830
+- bugfix: date-ordinal date format was incorrectly computed
+  same root cause aus for unixtimestamp and same triggering
+  condition. During the affected perido, the ordinal was one
+  too less.
+- bugfix: some race when shutting down input module threads
+  this had little, if at all, effect on real deployments as it resulted
+  in a small leak right before rsyslog termination. However, it caused
+  trouble with the testbench (and other QA tools).
+  Thanks to Peter Portante for the patch and both Peter and Janmejay
+  Singh for helping to analyze what was going on.
+- bugfix tcpflood: did not handle connection drops correct in TLS case
+  note that tcpflood is a testbench too. The bug caused some testbench
+  instability, but had no effect on deplyments.
+- bugfix: abort if global parameter value was wrong 
+  If so, the abort happened during startup. Once started,
+  all was stable.
+- bugfix omkafka: fix potential NULL pointer addressing
+  this happened when the topic cache was full and an entry
+  needed to be evicted
+- bugfix impstats: @cee cookie was prefixed to wrong fromat (json vs. cee)
+  Thanks to Volker Fröhlich for the fix.
+- bugfix imfile: fix race during startup that could lead to some duplication
+  If a to-be-monitored file was created after inotify was initialized
+  but before startup was completed, the first chunk of data from this
+  file could be duplicated. This should have happened very rarely in
+  practice, but caused occasional testbench failures.
+  see also: https://github.com/rsyslog/rsyslog/issues/791
+- bugfix: potential loss of single message at queue shutdown
+  see also: https://github.com/rsyslog/rsyslog/issues/262
+- bugfix: potential deadlock with heavy variable access
+  When making havy use of global, local and message variables, a deadlock
+  could occur. While it is extremly unlikely to happen, we have at least
+  seen one incarnation of this problem in practice.
+- bugfix ommysql: on some platforms, serverport parameter had no effect
+  This was caused by an invalid code sequence which's outcome depends on
+  compiler settings.
+- bugfix omelasticsearch: invalid pointer dereference
+  The actual practical impact is not clear. This came up when working
+  on compiler warnings.
+  Thanks to David Lang for the patch.
+- bugfix omhiredis: serverport config parameter did not reliably work
+  depended on environment/compiler used to build
+- bugfix rsgtutil: -h command line option did not work
+  Thanks to Henri Lakk for the patch.
+- bugfix lexer: hex numbers were not properly represented
+  see: https://github.com/rsyslog/rsyslog/pull/771
+  Thanks to Sam Hanes for the patch.
+- bugfix TLS syslog: intermittent errors while sending data
+  Regression from commit 1394e0b. A symptom often seen was the message
+  "unexpected GnuTLS error -50 in nsd_gtls.c:530"
+- bugfix imfile: abort on startup if no slash was present in file name param
+  Thanks to Brian Knox for the patch.
+- bugfix rsgtutil: fixed abort when using short command line options
+  Thanks to Henri Lakk 
+- bugfix rsgtutil: invalid computation of log record extraction file
+  This caused verification to fail because the hash chain was actually
+  incorrect. Depended on the input data set.
+  closes https://github.com/rsyslog/rsyslog/issues/832
+- bugfix build system: KSI components could only be build if in default path
+------------------------------------------------------------------------------
+Version 8.16.0 [v8-stable] 2016-01-26
+- rsgtutil: Added extraction support including loglines and hash chains. 
+  More details on how to extract loglines can be found in the rsgtutil
+  manpage. See also: https://github.com/rsyslog/rsyslog/issues/561   
+- clean up doAction output module interface
+  We started with char * pointers, but used different types of pointers
+  over time. This lead to alignment warnings. In practice, I think this
+  should never cause any problems (at least there have been no reports
+  in the 7 or so years we do this), but it is not clean. The interface is
+  now cleaned up. We do this in a way that does not require modifications
+  to modules that just use string parameters. For those with message
+  parameters, have a look at e.g. mmutf8fix to see how easy the
+  required change is.
+- new system properties for $NOW properties based on UTC
+  This permits to express current system time in UTC.
+  See also https://github.com/rsyslog/rsyslog/issues/729
+- impstats: support broken ElasticSearch JSON implementation
+  ES 2.0 no longer supports valid JSON and disallows dots inside names.
+  This adds a new "json-elasticsearch" format option which replaces
+  those dots by the bang ("!") character. So "discarded.full" becomes
+  "discarded!full".
+  This is a workaroud. A method that will provide more control over
+  replacements will be implemented some time in the future. For
+  details, see below-quoted issue tracker.
+  closes https://github.com/rsyslog/rsyslog/issues/713
+- omelasticsearch: craft better URLs
+  Elasticsearch is confused by url's ending in a bare '?' or '&'. While
+  this is valid, those are no longer produced.
+  Thanks to Benno Evers for the patch.
+- imfile: add experimental "reopenOnTruncate" parameter
+  Thanks to Matthew Wang for the patch.
+- bugfix imfile: proper handling of inotify initialization failure
+  Thanks to Zachary Zhao for the patch.
+- bugfix imfile: potential segfault due to improper handling of ev var
+  This occurs in inotify mode, only.
+  Thanks to Zachary Zhao and Peter Portante for the patch.
+  closes https://github.com/rsyslog/rsyslog/issues/718
+- bugfix imfile: potential segfault under heavey load.
+  This occurs in inotify mode when using wildcards, only.
+  The root cause is dropped IN_IGNOPRED inotify events which be dropped
+  in circumstance of high input pressure and frequent rotation, and
+  according to wikipeida, they can also be dropped in other conditions.
+  Thanks to Zachary Zhao for the patch.
+  closes https://github.com/rsyslog/rsyslog/issues/723
+- bugfix ommail: invalid handling of server response
+  if that response was split into different read calls. Could lead to
+  error-termination of send operation. Problem is pretty unlikely to
+  occur in standard setups (requires slow connection to SMTP server).
+  Thank to github user haixingood for the patch.
+- bugfix omelasticsearch: custom serverport was ignored on some platforms
+  Thanks to Benno Evers for the patch.
+- bugfix: tarball did not include some testbench files
+  Thanks to Thomas D. (whissi) for the patch.
+- bugfix: memory misadressing during config parsing string template
+  This occurred if an (invalid) template option larger than 63 characters
+  was given.
+  Thanks to git hub user c6226 for the patch.
+- bugfix imzmq: memory leak
+  Thanks to Jeremy Liang for the patch.
+- bugfix imzmq: memory leak
+  Thanks to github user xushengping for the patch.
+- bugfix omzmq: memory leak
+  Thanks to Jack Lin for the patch.
+- some code improvement and cleanup
+------------------------------------------------------------------------------
+Version 8.15.0 [v8-stable] 2015-12-15
+- KSI Lib: Updated code to run with libksi 3.4.0.5 
+  Also libksi 3.4.0.x is required to build rsyslog if ksi support
+  is enabled. New libpackages have been build as well. 
+- KSI utilities: Added option to ser publication url.
+  Since libksi 3.4.0.x, there is no default publication url anymore. 
+  The publication url has to be set using the --publications-server
+  Parameter, otherwise the ksi signature cannot be verified. UserID
+  and UserKey can also be set by parameter now.   
+  Closes https://github.com/rsyslog/rsyslog/issues/581
+- KSI Lib: Fixed wrong TLV container for KSI signatures from 0905 to 0906. 
+  closes https://github.com/rsyslog/rsyslog/issues/587
+- KSI/GT Lib: Fixed multiple issues found using static analyzer 
+- performance improvement for configs with heavy use of JSON variables
+  Depending on the config, this can be a very big gain in performance.
+- added pmpanngfw: contributed module for translating Palo Alto Networks logs. 
+  see also: https://github.com/rsyslog/rsyslog/pull/573
+  Thanks to Luigi Mori for the contribution. 
+- testbench: Changed valgrind option for imtcp-tls-basic-vg.sh
+  For details see: https://github.com/rsyslog/rsyslog/pull/569
+- pmciscoios: support for asterisk before timestamp added
+  thanks to github user c0by for the patch
+  see also: https://github.com/rsyslog/rsyslog/pull/583
+- solr external output plugin much enhanced
+  see also: https://github.com/rsyslog/rsyslog/pull/529
+  Thanks to Radu Gheorghe for the patch.
+- omrabbitmq: improvements
+  thanks to Luigi Mori for the patch
+  see also: https://github.com/rsyslog/rsyslog/pull/580
+- add support for libfastjson (as a replacement for json-c)
+- KSI utilities: somewhat improved error messages
+  Thanks to Henri Lakk for the patch.
+  see also: https://github.com/rsyslog/rsyslog/pull/588
+- pmciscoios: support for some format variations
+  Thanks to github user c0by for the patch
+- support grok via new contributed module mmgrok
+  Thanks to 饶琛琳 (github user chenryn) for the contribution.
+- omkafka: new statistics counter "maxoutqsize"
+  Thanks to 饶琛琳 (github user chenryn) for the contribution.
+- improvments for 0mq modules:
+  * omczmq - suspend / Retry handling - the output plugin can now recover
+    from some error states due to issues with plugin startup or message sending
+  * omczmq - refactored topic handling code for ZMQ_PUB output to be a little
+    more efficient
+  * omczmq - added ability to set a timeout for sends
+  * omczmq - set topics can be in separate frame (default) or part of message
+    frame (configurable)
+  * omcmzq - code cleanup
+  * imczmq - code cleanup
+  * imczmq - fixed a couple of cases where vars could be used uninitialized
+  * imczmq - ZMQ_ROUTER support
+  * imczmq - Fix small memory leak from not freeing sockets  when done with them
+  * allow creation of on demand ephemeral CurveZMQ certs for encryption.
+    Clients may specify clientcertpath="*" to indicate they want an on
+    demand generated cert.
+  Thanks to Brian Knox for the contributions.
+- cleanup on code to unset a variable
+  under extreme cases (very, very unlikely), the old code could also lead
+  to errornous processing
+- omelasticsearch: build on FreeBSD
+  Thanks to github user c0by for the patch
+- pmciscoios: fix some small issues clang static analyzer detected
+- testbench: many improvements and some new tests
+  note that there still is a number of tests which are somewhat racy
+- overall code improvements thanks to clang static analyzer
+- gnutls fix: Added possible fix for gnutls issue #575
+  see also: https://github.com/rsyslog/rsyslog/issues/575
+  Thanks to Charles Southerland for the patch
+- bugfix omkafka: restore ability to build on all platforms
+  Undo commit aea09800643343ab8b6aa205b0f10a4be676643b
+  because that lead to build failures on various important platforms.
+  This means it currently is not possible to configure the location
+  of librdkafka, but that will affect far fewer people.
+  closes: https://github.com/rsyslog/rsyslog/issues/596
+- bugfix omkafka: fix potentially negative partition number
+  Thanks to Tait Clarridge for providing a patch.
+- bugfix: solve potential race in creation of additional action workers
+  Under extreme circumstances, this could lead to segfault. Note that we
+  detected this problem thanks to ASAN address sanitzier in combination
+  with a very exterme testbench test. We do not think that this issue
+  was ever reported in practice.
+- bugfix: potential memory leak in config parsing
+  Thanks to github user linmujia for the patch
+- bugfix: small memory leak in loading template config
+  This happened when a plugin was used inside the template. Then, the
+  memory for the template name was never freed.
+  Thanks to github user xushengping for the fix.
+- bugfix: fix extra whitespace in property expansions
+  Address off-by-one issues introduced in f3bd7a2 resulting in extra
+  whitespace in property expansions
+  Thanks to Matthew Gabeler-Lee for the patch.
+- bugfix: mmfields leaked memory if very large messages were processed
+  detected by clang static analyzer
+- bugfix: mmfields could add garbagge data to field
+  this happened when very large fields were to be processed.
+  Thanks to Peter Portante for reporting this.
+- bugfix: omhttpfs now also compiles with older json-c lib
+- bugfix: memory leak in (contributed) module omhttpfs
+  Thanks to git hub user c6226 for the patch.
+- bugfix: parameter mismatch in error message for wrap() function
+- bugfix: parameter mismatch in error message for random() function
+- bugfix: divide by zero if max() function was provided zero
+- bugfix: invalid mutex handling in omfile async write mode
+  could lead to segfault, even though highly unlikely (caught by
+  testbench on a single platform)
+- bugfix: fix inconsistent number processing
+  Unfortunately, previous versions of the rule engine tried to
+  support oct and hex, but that wasn't really the case.
+  Everything based on JSON was just dec-converted. As this was/is
+  the norm, we fix that inconsistency by always using dec.
+  Luckly, oct and hex support was never documented and could
+  probably only have been activated by constant numbers.
+- bugfix: timezone() object: fix NULL pointer dereference
+  This happened during startup when the offset or id parameter was not
+  given. Could lead to a segfault at startup.
+  Detected by clang static analyzer.
+- bugfix omfile: memory addressing error if very long outchannel name used
+  Thanks to github user c6226 for the patch.
+------------------------------------------------------------------------------
+Version 8.14.0 [v8-stable] 2015-11-03
+- Added possibility to customize librdkafka location
+  see also: https://github.com/rsyslog/rsyslog/pull/502
+  Thanks to Matthew Wang for the patch.
+- add property "rawmsg-after-pri"
+- bugfix: potential misadresseing in imfile
+  Could happen when wildcards were used.
+  see also https://github.com/rsyslog/rsyslog/issues/532
+  see also https://github.com/rsyslog/rsyslog/issues/534
+  Thanks to zhangdaoling for the bugfix.
+- bugfix: re_extract RainerScript function did not work
+  Thanks to Janmejay Singh for the patch
+------------------------------------------------------------------------------
+Version 8.13.0 [v8-stable] 2015-09-22
+- ZeroMQ enhancements:
+  * Added the ability to set a static publishing topic per action as an
+    alternative to constructing topics with templates
+    Contributor: Luca Bocassi
+  * ZMQ_PUB socket now defaults to bind and ZMQ_SUB socket now defaults to
+    connect - Contributor: Luca Bocassi
+- Redis enhancements:
+  * Can now LPUSH to a Redis list in "queue" mode - Contributor: Brian Knox
+  * Can now PUBLISH to a Redis channel in "publish" mode
+    Contributor: Brian Knox
+- build requirement for rsyslog/mmnormalize is now liblognorm 1.1.2 or above
+- mmnormalize: liblognorm error messages are now emitted via regular
+  rsyslog error reporting mechanism (aka "are now logged")
+  This is possible due to a new API in liblognorm 1.1.2;
+  Note that the amount of error messages depends on the version of
+  liblognorm used.
+- add support for TCP client side keep-alives
+  Thanks to github user tinselcity for the patch.
+- bugfix: imtcp/TLS hangs on dropped packets
+  see also https://github.com/rsyslog/rsyslog/issues/318
+  Thanks to github user tinselcity for the patch.
+- bugfix testbench: some tests using imptcp are run if module is disabled
+  Thanks to Michael Biebl for reporting this
+  see also https://github.com/rsyslog/rsyslog/issues/524
+- bugfix omkafka: Fixes a bug not accepting new messages anymore. 
+  see also: https://github.com/rsyslog/rsyslog/pull/472
+  Thanks to Janmejay Singh
+- bugfix: Parallel build issue "cannot find ../runtime/.libs/librsyslog.a:
+  No such file or directory" (#479) fixed.
+  Thanks to Thomas D. (Whissi) for the patch.
+- bugfix: Added missing mmpstructdata testfiles into makefile.
+  see also: https://github.com/rsyslog/rsyslog/issues/484
+- bugfix: Reverted FIX for issue #392 as it had unexpected side effects.
+  The new fix duplicates the Listener object for static files (like
+  done for dynamic files already), resolving issue #392 and #490. 
+  see also https://github.com/rsyslog/rsyslog/pull/490 
+- bugfix: issues in queue subsystem if syncqueuefiles was enabled
+  * Error 14 was generated on the .qi file directory handle.
+    As the .qi filestream does not have a directory set, fsync
+    was called on an empty directory causing a error 14 in debug log.
+  * When queue files existed on startup, the bSyncQueueFiles
+    strm property was not set to 1. This is now done in the
+    qqueueLoadPersStrmInfoFixup function.
+- bugfix/testbench: tcpflood tool could abort when random data was added
+  see also: https://github.com/rsyslog/rsyslog/issues/506
+  Thanks to Louis Bouchard for the fix
+- rscryutil: Added support to decrypt a not closed log file.
+  Thanks to wizard1024 for the patch.
+------------------------------------------------------------------------------
+Version 8.12.0 [v8-stable] 2015-08-11
+- Harmonize resetConfigVariables values and defaults
+  see also https://github.com/rsyslog/rsyslog/pull/413
+  Thanks to Tomas Heinrich for the patch.
+- GT/KSI: fix some issues in signature file format and add conversion tool
+  The file format is incompatible to previous format, but tools have been
+  upgraded to handle both and also an option been added to convert from
+  old to new format.
+- bugfix: ommysql did not work when gnutls was enabled
+  as it turned out, this was due to a check for GnuTLS functions
+  with the side-effect that
+  AC_CHECK_LIB, by default, adds the lib to LIBS, if there is no
+  explicit action, what was the case here. So everything was now
+  linked against GnuTLS, which in turn made ommysql fail.
+  Thanks to Thomas D. (whissi) for the analysis of the ommysql/gnutls
+  problem and Thomas Heinrich for pointing out that AC_CHECK_LIB might
+  be the culprit.
+- bugfix omfile: potential memory leak on file close
+  see also: https://github.com/rsyslog/rsyslog/pull/423
+  Thanks to Robert Schiele for the patch.
+- bugfix omfile: potential race in dynafile detection/creation
+  This could lead to a segfault.
+  Thanks to Tomas Heinrich for the patch.
+- bugfix omfile: Fix race-condition detection in path-creation code
+  The affected code is used to detect a race condition in between
+  testing for the existence of a directory and creating it if it didn't
+  exist.  The variable tracking the number of attempts wasn't reset for
+  subsequent elements in the path, thus limiting the number of
+  reattempts to one per the whole path, instead of one per each path
+  element.
+  This solution was provided by Martin Poole.
+- bugfix parser subsystem: potential misadressing in SanitizeMsg()
+  could lead to a segfault
+  Thanks to Tomas Heinrich for the patch.
+- imfile: files moved outside of directory are now (properly) handled
+- bugfix: imfile: segfault when using startmsg.regex if first log line
+  doesn't match 
+  Thanks to Ciprian Hacman for the patch.
+- bugfix imfile: file table was corrupted when on file deletion
+  This could happen when a file that was statically configured (not via an
+  wildcard) was deleted.
+- bugfix ompgsql: transaction were improperly handled
+  now transaction support is solidly disabled until we have enough requests
+  to implement it again. Module still works fine in single insert mode.
+  closes https://github.com/rsyslog/rsyslog/issues/399
+- bugfix mmjsonparse: memory leak if non-cee-json message is processed
+  see also https://github.com/rsyslog/rsyslog/pull/383
+  Thanks to Anton Matveenko for the patch
+- testbench: remove raciness from UDP based tests
+- testbench: added bash into all scripts makign it mandatory
+- bugfix testbench: Fixed problem building syslog_caller util when 
+  liblogging-stdlog is not available. 
+  Thanks to Louis Bouchard for the patch
+- bugfix rscryutil.1: Added fix checking for generate_man_pages condition
+  Thanks to Radovan Sroka for the patch
+- bugfix freebsd console: \n (NL) is prepended with \r (CR) in console
+  output on freebsd only. For more details see here: 
+  https://github.com/rsyslog/rsyslog/issues/372
+  Thanks to AlexandreFenyo for the patch
+------------------------------------------------------------------------------
 Version 8.11.0 [v8-stable] 2015-06-30
+- new signature provider for Keyless Signature Infrastructure (KSI) added
 - build system: re-enable use of "make distcheck"
+- add new signature provider for Kesless Signature Infrastructure (KSI)
+  This has also been added to existing tooling; KSI is kind of v2 of
+  the Guardtime functionality and has been added in the appropriate
+  places.
 - bugfix imfile: regex multiline mode ignored escapeLF option
   Thanks to Ciprian Hacman for reporting the problem
   closes https://github.com/rsyslog/rsyslog/issues/370
@@ -25,6 +519,14 @@ Version 8.11.0 [v8-stable] 2015-06-30
   now added compatibility function. This came up on Solaris builds.
   Thanks to Dagobert Michelsen for reporting the problem.
   closes https://github.com/rsyslog/rsyslog/issues/347
+- bugfix imjournal: do not pass empty messages to rsyslog core
+  this causes a crash of the daemon
+  see also https://github.com/rsyslog/rsyslog/pull/412
+  Thanks to Tomas Heinrich for the patch.
+- bugfix imjournal: cosmetic memory leak
+  very small and an shutdown only, so did not affect operations
+  see also https://github.com/rsyslog/rsyslog/pull/411
+  Thanks to Tomas Heinrich for the patch.
 ------------------------------------------------------------------------------
 Version 8.10.0 [v8-stable] 2015-05-19
 - imfile: add capability to process multi-line messages based on regex
@@ -58,6 +560,11 @@ Version 8.10.0 [v8-stable] 2015-05-19
   source builds per default but enforced when building from git source.
 - mmpstrucdata: some code cleanup
   removed lots of early development debug outputs
+- bugfix imuxsock: fix a memory leak that happened with large messages
+  ... when annotation was enabled.
+  Thanks to github user c6226 for the patch
+- bugfix omhttpfs: memory leak
+  Thanks to github user c6226 for the patch
 - bugfix imuxsock: fix a crash when setting a hostname
   Setting a hostname via the legacy directive would lead to a crash
   during shutdown caused by a double-free.
@@ -383,9 +890,9 @@ Version 8.3.4 [v8-devel] 2014-07-11
 ---------------------------------------------------------------------------
 Version 8.3.3 [v8-devel] 2014-06-26
 - unify input object naming
-  imudp now supports "name" paramter, as other inputs do. "inputname" has
+  imudp now supports "name" parameter, as other inputs do. "inputname" has
   been deprecated, but can still be used. Same applies to "appendport"
-  subparamter". Thanks to "Nick Syslog" for the suggestion.
+  subparameter". Thanks to "Nick Syslog" for the suggestion.
 - made the missing (contributed) modules build under v8 [import from 8.2.2]
   Modules:
   * mmrfc5424addhmac
@@ -966,7 +1473,7 @@ This starts a new stable branch based on 7.5.8 plus the following changes:
 ---------------------------------------------------------------------------
 Version 7.5.8 [v7-release candidate] 2014-01-09
 - add exec_template() RainerScript function
-- add debug.onShutdown and debug.logFile global paramters
+- add debug.onShutdown and debug.logFile global parameters
   These enebale the new "debug on shutdown" mode, which can be used to
   track hard to find problems that occur during system shutdown.
 - Add directives for numerically specifying GIDs/UIDs
@@ -1153,7 +1660,7 @@ Version 7.5.3 [devel] 2013-09-11
 - imudp: add ability to specify SO_RCVBUF size (rcvbufSize parameter)
 - imudp: use inputname for statistics, if configured
 - impstats: add process resource usage counters [via getrusage()]
-- impstats: add paramter "resetCounters" to report delta values
+- impstats: add parameter "resetCounters" to report delta values
   possible for most, but not all, counters. See doc for details.
 - librelp 1.2.0 is now required
 - make use of new librelp generic error reporting facility
@@ -1820,7 +2327,7 @@ Version 7.3.0  [devel] 2012-10-09
   * support for config load phases & module() parameters
   * support for default templates
   * driverdirectory is now cleanly a global parameter, but can no longer
-    be specified as an action paramter. Note that in previous versions
+    be specified as an action parameter. Note that in previous versions
     this parameter was ignored in all but the first action definition
 - improved omfile zip writer to increase compression
   This was achieved by somewhat reducing the robustness of the zip archive.
@@ -1873,7 +2380,7 @@ Version 7.2.7  [v7-stable] 2013-04-17
 - bugfix: using group resolution could lead to endless loop
   Thanks to Tomas Heinrich for the patch.
   closes: http://bugzilla.adiscon.com/show_bug.cgi?id=310
-- bugfix: $mmnormalizeuseramsg paramter was specified with wrong type
+- bugfix: $mmnormalizeuseramsg parameter was specified with wrong type
   Thank to Renzhong Zhang for alerting us of the problem.
   closes: http://bugzilla.adiscon.com/show_bug.cgi?id=420
 - bugfix: RainerScript getenv() function caused segfault when var was

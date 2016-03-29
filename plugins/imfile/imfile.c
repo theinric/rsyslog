@@ -12,11 +12,11 @@
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *       http://www.apache.org/licenses/LICENSE-2.0
  *       -or-
  *       see COPYING.ASL20 in the source distribution
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -102,6 +102,7 @@ typedef struct lstn_s {
 	int iFacility;
 	int iSeverity;
 	int maxLinesAtOnce;
+	uint32_t trimLineOverBytes;
 	int nRecords; /**< How many records did we process before persisting the stream? */
 	int iPersistStateInterval; /**< how often should state be persisted? (0=on close only) */
 	strm_t *pStrm;	/* its stream (NULL if not assigned) */
@@ -112,7 +113,9 @@ typedef struct lstn_s {
 	regex_t end_preg;	/* compiled version of startRegex */
 	uchar *prevLineSegment;	/* previous line segment (in regex mode) */
 	sbool escapeLF;	/* escape LF inside the MSG content? */
+	sbool reopenOnTruncate;
 	sbool addMetadata;
+	sbool addCeeTag;
 	ruleset_t *pRuleset;	/* ruleset to bind listener to (use system default if unspecified) */
 	ratelimit_t *ratelimiter;
 	multi_submit_t multiSub;
@@ -128,8 +131,8 @@ static struct configSettings_s {
 	int iFacility; /* local0 */
 	int iSeverity;  /* notice, as of rfc 3164 */
 	int readMode;  /* mode to use for ReadMultiLine call */
-	int maxLinesAtOnce;	/* how many lines to process in a row? */
-	ruleset_t *pBindRuleset;	/* ruleset to bind listener to (use system default if unspecified) */
+	int64 maxLinesAtOnce;	/* how many lines to process in a row? */
+	uint32_t trimLineOverBytes;  /* 0: never trim line, positive number: trim line if over bytes */
 } cs;
 
 struct instanceConf_s {
@@ -147,8 +150,11 @@ struct instanceConf_s {
 	uint8_t readMode;
 	uchar *startRegex;
 	sbool escapeLF;
+	sbool reopenOnTruncate;
+	sbool addCeeTag;
 	sbool addMetadata;
 	int maxLinesAtOnce;
+	uint32_t trimLineOverBytes;
 	ruleset_t *pBindRuleset;	/* ruleset to bind listener to (use system default if unspecified) */
 	struct instanceConf_s *next;
 };
@@ -260,12 +266,15 @@ static struct cnfparamdescr inppdescr[] = {
 	{ "readmode", eCmdHdlrInt, 0 },
 	{ "startmsg.regex", eCmdHdlrString, 0 },
 	{ "escapelf", eCmdHdlrBinary, 0 },
+	{ "reopenontruncate", eCmdHdlrBinary, 0 },
 	{ "maxlinesatonce", eCmdHdlrInt, 0 },
+	{ "trimlineoverbytes", eCmdHdlrInt, 0 },
 	{ "maxsubmitatonce", eCmdHdlrInt, 0 },
 	{ "removestateondelete", eCmdHdlrBinary, 0 },
 	{ "persiststateinterval", eCmdHdlrInt, 0 },
 	{ "deletestateonfiledelete", eCmdHdlrBinary, 0 },
 	{ "addmetadata", eCmdHdlrBinary, 0 },
+	{ "addceetag", eCmdHdlrBinary, 0 },
 	{ "statefile", eCmdHdlrString, CNFPARAM_DEPRECATED }
 };
 static struct cnfparamblk inppblk =
@@ -285,9 +294,9 @@ static void
 dbg_wdmapPrint(char *msg)
 {
 	int i;
-	dbgprintf("%s\n", msg);
+	DBGPRINTF("%s\n", msg);
 	for(i = 0 ; i < nWdmap ; ++i)
-		dbgprintf("wdmap[%d]: wd: %d, file %d, dir %d\n", i,
+		DBGPRINTF("wdmap[%d]: wd: %d, file %d, dir %d\n", i,
 			  wdmap[i].wd, wdmap[i].fIdx, wdmap[i].dirIdx);
 }
 #endif
@@ -304,6 +313,22 @@ finalize_it:
 	RETiRet;
 }
 
+/* looks up a wdmap entry by dirIdx and returns it's index if found
+ * or -1 if not found.
+ */
+static int
+wdmapLookupListner(lstn_t* pLstn)
+{
+	int i = 0;
+	int wd = -1;
+	/* Loop through */
+	for(i = 0 ; i < nWdmap; ++i) {
+		if (wdmap[i].pLstn == pLstn)
+			wd = wdmap[i].wd;
+	}
+
+	return wd;
+}
 
 /* compare function for bsearch() */
 static int
@@ -340,7 +365,7 @@ wdmapAdd(int wd, const int dirIdx, lstn_t *const pLstn)
 		; 	/* just scan */
 	if(i >= 0 && wdmap[i].wd == wd) {
 		DBGPRINTF("imfile: wd %d already in wdmap!\n", wd);
-		FINALIZE;
+		ABORT_FINALIZE(RS_RET_FILE_ALREADY_IN_TABLE);
 	}
 	++i;
 	/* i now points to the entry that is to be moved upwards (or end of map) */
@@ -353,14 +378,13 @@ wdmapAdd(int wd, const int dirIdx, lstn_t *const pLstn)
 	}
 	if(i < nWdmap) {
 		/* we need to shift to make room for new entry */
-		dbgprintf("DDDD: imfile doing wdmap mmemmov(%d, %d, %d) for ADD\n", i,i+1,nWdmap-i);
-		memmove(wdmap + i, wdmap + i + 1, nWdmap - i);
+		memmove(wdmap + i + 1, wdmap + i, sizeof(wd_map_t) * (nWdmap - i));
 	}
 	wdmap[i].wd = wd;
 	wdmap[i].dirIdx = dirIdx;
 	wdmap[i].pLstn = pLstn;
 	++nWdmap;
-	dbgprintf("DDDD: imfile: enter into wdmap[%d]: wd %d, dir %d, lstn %s:%s\n",i,wd,dirIdx,
+	DBGPRINTF("imfile: enter into wdmap[%d]: wd %d, dir %d, lstn %s:%s\n",i,wd,dirIdx,
 		  (pLstn == NULL) ? "DIRECTORY" : "FILE",
 	          (pLstn == NULL) ? dirs[dirIdx].dirName : pLstn->pszFileName);
 
@@ -383,11 +407,10 @@ wdmapDel(const int wd)
 
 	if(i < nWdmap-1) {
 		/* we need to shift to delete it (see comment at wdmap definition) */
-		dbgprintf("DDDD: imfile doing wdmap mmemmov(%d, %d, %d) for DEL\n", i,i+1,nWdmap-i-1);
-		memmove(wdmap + i, wdmap + i+1, nWdmap - i-1);
+		memmove(wdmap + i, wdmap + i + 1, sizeof(wd_map_t) * (nWdmap - i - 1));
 	}
 	--nWdmap;
-	dbgprintf("DDDD: imfile: wd %d deleted, was idx %d\n", wd, i);
+	DBGPRINTF("imfile: wd %d deleted, was idx %d\n", wd, i);
 
 finalize_it:
 	RETiRet;
@@ -440,7 +463,19 @@ static rsRetVal enqLine(lstn_t *const __restrict__ pLstn,
 	CHKiRet(msgConstruct(&pMsg));
 	MsgSetFlowControlType(pMsg, eFLOWCTL_FULL_DELAY);
 	MsgSetInputName(pMsg, pInputName);
-	MsgSetRawMsg(pMsg, (char*)rsCStrGetSzStr(cstrLine), cstrLen(cstrLine));
+	if (pLstn->addCeeTag) {
+		size_t msgLen = cstrLen(cstrLine);
+		char *ceeToken = "@cee:";
+		size_t ceeMsgSize = msgLen + strlen(ceeToken);
+		char *ceeMsg;
+		CHKmalloc(ceeMsg = MALLOC(ceeMsgSize));
+		strcpy(ceeMsg, ceeToken);
+		strcat(ceeMsg, (char*)rsCStrGetSzStrNoNULL(cstrLine));
+		MsgSetRawMsg(pMsg, ceeMsg, ceeMsgSize);
+		free(ceeMsg);
+	} else {
+		MsgSetRawMsg(pMsg, (char*)rsCStrGetSzStrNoNULL(cstrLine), cstrLen(cstrLine));
+	}
 	MsgSetMSGoffs(pMsg, 0);	/* we do not have a header... */
 	MsgSetHOSTNAME(pMsg, glbl.GetLocalHostName(), ustrlen(glbl.GetLocalHostName()));
 	MsgSetTAG(pMsg, pLstn->pszTag, pLstn->lenTag);
@@ -471,18 +506,18 @@ openFile(lstn_t *pLstn)
 	DBGPRINTF("imfile: trying to open state for '%s', state file '%s'\n",
 		  pLstn->pszFileName, statefn);
 	/* Construct file name */
-	lenSFNam = snprintf((char*)pszSFNam, sizeof(pszSFNam) / sizeof(uchar), "%s/%s",
+	lenSFNam = snprintf((char*)pszSFNam, sizeof(pszSFNam), "%s/%s",
 			     (char*) glbl.GetWorkDir(), (char*)statefn);
 
 	/* check if the file exists */
 	if(stat((char*) pszSFNam, &stat_buf) == -1) {
 		if(errno == ENOENT) {
-			dbgprintf("imfile: clean startup, state file for '%s'\n", pLstn->pszFileName);
+			DBGPRINTF("imfile: clean startup, state file for '%s'\n", pLstn->pszFileName);
 			ABORT_FINALIZE(RS_RET_FILE_NOT_FOUND);
 		} else {
 			char errStr[1024];
 			rs_strerror_r(errno, errStr, sizeof(errStr));
-			dbgprintf("imfile: error trying to access state file for '%s':%s\n",
+			DBGPRINTF("imfile: error trying to access state file for '%s':%s\n",
 			          pLstn->pszFileName, errStr);
 			ABORT_FINALIZE(RS_RET_IO_ERROR);
 		}
@@ -498,6 +533,7 @@ openFile(lstn_t *pLstn)
 
 	/* read back in the object */
 	CHKiRet(obj.Deserialize(&pLstn->pStrm, (uchar*) "strm", psSF, NULL, pLstn));
+	CHKiRet(strm.SetbReopenOnTruncate(pLstn->pStrm, pLstn->reopenOnTruncate));
 	DBGPRINTF("imfile: deserialized state file, state file base name '%s', "
 		  "configured base name '%s'\n", pLstn->pStrm->pszFName,
 		  pLstn->pszFileName);
@@ -571,7 +607,7 @@ pollFile(lstn_t *pLstn, int *pbHadFileData)
 		if(pLstn->maxLinesAtOnce != 0 && nProcessed >= pLstn->maxLinesAtOnce)
 			break;
 		if(pLstn->startRegex == NULL) {
-			CHKiRet(strm.ReadLine(pLstn->pStrm, &pCStr, pLstn->readMode, pLstn->escapeLF));
+			CHKiRet(strm.ReadLine(pLstn->pStrm, &pCStr, pLstn->readMode, pLstn->escapeLF, pLstn->trimLineOverBytes));
 		} else {
 			CHKiRet(strmReadMultiLine(pLstn->pStrm, &pCStr, &pLstn->end_preg, pLstn->escapeLF));
 		}
@@ -599,7 +635,7 @@ finalize_it:
 #pragma GCC diagnostic warning "-Wempty-body"
 
 
-/* create input instance, set default paramters, and
+/* create input instance, set default parameters, and
  * add it to the list of instances.
  */
 static rsRetVal
@@ -619,12 +655,15 @@ createInstance(instanceConf_t **pinst)
 	inst->iSeverity = 5;
 	inst->iFacility = 128;
 	inst->maxLinesAtOnce = 0;
+	inst->trimLineOverBytes = 0;
 	inst->iPersistStateInterval = 0;
 	inst->readMode = 0;
 	inst->startRegex = NULL;
 	inst->bRMStateOnDel = 1;
 	inst->escapeLF = 1;
+	inst->reopenOnTruncate = 0;
 	inst->addMetadata = ADD_METADATA_UNSPECIFIED;
+	inst->addCeeTag = 0;
 
 	/* node created, let's add to config */
 	if(loadModConf->tail == NULL) {
@@ -647,10 +686,12 @@ static int
 getBasename(uchar *const __restrict__ basen, uchar *const __restrict__ path)
 {
 	int i;
+	int found = 0;
 	const int lenName = ustrlen(path);
 	for(i = lenName ; i >= 0 ; --i) {
 		if(path[i] == '/') {
 			/* found basename component */
+			found = 1;
 			if(i == lenName)
 				basen[0] = '\0';
 			else {
@@ -659,7 +700,11 @@ getBasename(uchar *const __restrict__ basen, uchar *const __restrict__ path)
 			break;
 		}
 	}
-	return i;
+	if (found == 1)
+		return i;
+	else {
+		return -1;
+	}
 }
 
 /* this function checks instance parameters and does some required pre-processing
@@ -678,7 +723,19 @@ checkInstance(instanceConf_t *inst)
 	char errStr[512];
 	DEFiRet;
 
+	/* this is primarily for the clang static analyzer, but also
+	 * guards against logic errors in the config handler.
+	 */
+	if(inst->pszFileName == NULL)
+		ABORT_FINALIZE(RS_RET_INTERNAL_ERROR);
+
 	i = getBasename(basen, inst->pszFileName);
+	if (i == -1) {
+		errmsg.LogError(0, RS_RET_CONFIG_ERROR, "imfile: file path '%s' does not include a basename component",
+			inst->pszFileName);
+		ABORT_FINALIZE(RS_RET_CONFIG_ERROR);
+	}
+	
 	memcpy(dirn, inst->pszFileName, i); /* do not copy slash */
 	dirn[i] = '\0';
 	CHKmalloc(inst->pszFileBaseName = (uchar*) strdup((char*)basen));
@@ -743,10 +800,13 @@ addInstance(void __attribute__((unused)) *pVal, uchar *pNewVal)
 			inst->maxLinesAtOnce = cs.maxLinesAtOnce;
 		}
 	}
+	inst->trimLineOverBytes = cs.trimLineOverBytes;
 	inst->iPersistStateInterval = cs.iPersistStateInterval;
 	inst->readMode = cs.readMode;
 	inst->escapeLF = 0;
+	inst->reopenOnTruncate = 0;
 	inst->addMetadata = 0;
+	inst->addCeeTag = 0;
 	inst->bRMStateOnDel = 0;
 
 	CHKiRet(checkInstance(inst));
@@ -770,7 +830,7 @@ lstnAdd(lstn_t **newLstn)
 {
 	lstn_t *pLstn;
 	DEFiRet;
-	
+
 	CHKmalloc(pLstn = (lstn_t*) MALLOC(sizeof(lstn_t)));
 	if(runModConf->pRootLstn == NULL) {
 		runModConf->pRootLstn = pLstn;
@@ -782,7 +842,7 @@ lstnAdd(lstn_t **newLstn)
 	runModConf->pTailLstn = pLstn;
 	pLstn->next = NULL;
 	*newLstn = pLstn;
-	
+
 finalize_it:
 	RETiRet;
 }
@@ -791,7 +851,7 @@ finalize_it:
 static void
 lstnDel(lstn_t *pLstn)
 {
-	dbgprintf("imfile: lstnDel called for %s\n", pLstn->pszFileName);
+	DBGPRINTF("imfile: lstnDel called for %s\n", pLstn->pszFileName);
 	if(pLstn->pStrm != NULL) { /* stream open? */
 		persistStrmState(pLstn);
 		strm.Destruct(&(pLstn->pStrm));
@@ -821,7 +881,7 @@ lstnDel(lstn_t *pLstn)
  * the ppExisting parameter.
  */
 static rsRetVal
-lstnDup(lstn_t ** ppExisting, uchar *const __restrict__ newname)
+lstnDup(lstn_t **ppExisting, uchar *const __restrict__ newname)
 {
 	DEFiRet;
 	lstn_t *const existing = *ppExisting;
@@ -830,7 +890,10 @@ lstnDup(lstn_t ** ppExisting, uchar *const __restrict__ newname)
 	CHKiRet(lstnAdd(&pThis));
 	pThis->pszDirName = existing->pszDirName; /* read-only */
 	pThis->pszBaseName = (uchar*)strdup((char*)newname);
-	asprintf((char**)&pThis->pszFileName, "%s/%s", (char*)pThis->pszDirName, (char*)newname);
+	if(asprintf((char**)&pThis->pszFileName, "%s/%s", (char*)pThis->pszDirName, (char*)newname) == -1) {
+		DBGPRINTF("imfile/lstnDup: asprintf failed, malfunction can happen\n");
+		ABORT_FINALIZE(RS_RET_OUT_OF_MEMORY);
+	}
 	pThis->pszTag = (uchar*) strdup((char*) existing->pszTag);
 	pThis->lenTag = ustrlen(pThis->pszTag);
 	pThis->pszStateFile = existing->pszStateFile == NULL ? NULL : (uchar*) strdup((char*) existing->pszStateFile);
@@ -842,18 +905,21 @@ lstnDup(lstn_t ** ppExisting, uchar *const __restrict__ newname)
 	pThis->iSeverity = existing->iSeverity;
 	pThis->iFacility = existing->iFacility;
 	pThis->maxLinesAtOnce = existing->maxLinesAtOnce;
+	pThis->trimLineOverBytes = existing->trimLineOverBytes;
 	pThis->iPersistStateInterval = existing->iPersistStateInterval;
 	pThis->readMode = existing->readMode;
 	pThis->startRegex = existing->startRegex; /* no strdup, as it is read-only */
 	if(pThis->startRegex != NULL) // TODO: make this a single function with better error handling
 		if(regcomp(&pThis->end_preg, (char*)pThis->startRegex, REG_EXTENDED)) {
-			dbgprintf("imfile: error regex compile\n");
+			DBGPRINTF("imfile: error regex compile\n");
 			ABORT_FINALIZE(RS_RET_ERR);
 		}
 	pThis->bRMStateOnDel = existing->bRMStateOnDel;
 	pThis->hasWildcard = existing->hasWildcard;
 	pThis->escapeLF = existing->escapeLF;
+	pThis->reopenOnTruncate = existing->reopenOnTruncate;
 	pThis->addMetadata = existing->addMetadata;
+	pThis->addCeeTag = existing->addCeeTag;
 	pThis->pRuleset = existing->pRuleset;
 	pThis->nRecords = 0;
 	pThis->pStrm = NULL;
@@ -908,18 +974,21 @@ addListner(instanceConf_t *inst)
 	pThis->iSeverity = inst->iSeverity;
 	pThis->iFacility = inst->iFacility;
 	pThis->maxLinesAtOnce = inst->maxLinesAtOnce;
+	pThis->trimLineOverBytes = inst->trimLineOverBytes;
 	pThis->iPersistStateInterval = inst->iPersistStateInterval;
 	pThis->readMode = inst->readMode;
 	pThis->startRegex = inst->startRegex; /* no strdup, as it is read-only */
 	if(pThis->startRegex != NULL)
 		if(regcomp(&pThis->end_preg, (char*)pThis->startRegex, REG_EXTENDED)) {
-			dbgprintf("imfile: error regex compile\n");
+			DBGPRINTF("imfile: error regex compile\n");
 			ABORT_FINALIZE(RS_RET_ERR);
 		}
 	pThis->bRMStateOnDel = inst->bRMStateOnDel;
 	pThis->escapeLF = inst->escapeLF;
+	pThis->reopenOnTruncate = inst->reopenOnTruncate;
 	pThis->addMetadata = (inst->addMetadata == ADD_METADATA_UNSPECIFIED) ?
 			       hasWildcard : inst->addMetadata;
+	pThis->addCeeTag = inst->addCeeTag;
 	pThis->pRuleset = inst->pBindRuleset;
 	pThis->nRecords = 0;
 	pThis->pStrm = NULL;
@@ -943,7 +1012,7 @@ CODESTARTnewInpInst
 	}
 
 	if(Debug) {
-		dbgprintf("input param blk in imfile:\n");
+		DBGPRINTF("input param blk in imfile:\n");
 		cnfparamsPrint(&inppblk, pvals);
 	}
 
@@ -974,8 +1043,12 @@ CODESTARTnewInpInst
 			inst->bRMStateOnDel = (sbool) pvals[i].val.d.n;
 		} else if(!strcmp(inppblk.descr[i].name, "addmetadata")) {
 			inst->addMetadata = (sbool) pvals[i].val.d.n;
+		} else if (!strcmp(inppblk.descr[i].name, "addceetag")) {
+			inst->addCeeTag = (sbool) pvals[i].val.d.n;
 		} else if(!strcmp(inppblk.descr[i].name, "escapelf")) {
 			inst->escapeLF = (sbool) pvals[i].val.d.n;
+		} else if(!strcmp(inppblk.descr[i].name, "reopenontruncate")) {
+			inst->reopenOnTruncate = (sbool) pvals[i].val.d.n;
 		} else if(!strcmp(inppblk.descr[i].name, "maxlinesatonce")) {
 			if(   loadModConf->opMode == OPMODE_INOTIFY
 			   && pvals[i].val.d.n > 0) {
@@ -985,12 +1058,14 @@ CODESTARTnewInpInst
 			} else {
 				inst->maxLinesAtOnce = pvals[i].val.d.n;
 			}
+		} else if(!strcmp(inppblk.descr[i].name, "trimlineoverbytes")) {
+			inst->trimLineOverBytes = pvals[i].val.d.n;
 		} else if(!strcmp(inppblk.descr[i].name, "persiststateinterval")) {
 			inst->iPersistStateInterval = pvals[i].val.d.n;
 		} else if(!strcmp(inppblk.descr[i].name, "maxsubmitatonce")) {
 			inst->nMultiSub = pvals[i].val.d.n;
 		} else {
-			dbgprintf("imfile: program error, non-handled "
+			DBGPRINTF("imfile: program error, non-handled "
 			  "param '%s'\n", inppblk.descr[i].name);
 		}
 	}
@@ -1025,7 +1100,7 @@ CODESTARTbeginCnfLoad
 	cs.iSeverity = 5;
 	cs.readMode = 0;
 	cs.maxLinesAtOnce = 10240;
-	cs.pBindRuleset = NULL;
+	cs.trimLineOverBytes = 0;
 ENDbeginCnfLoad
 
 
@@ -1042,7 +1117,7 @@ CODESTARTsetModCnf
 	}
 
 	if(Debug) {
-		dbgprintf("module (global) param blk for imfile:\n");
+		DBGPRINTF("module (global) param blk for imfile:\n");
 		cnfparamsPrint(&modpblk, pvals);
 	}
 
@@ -1063,7 +1138,7 @@ CODESTARTsetModCnf
 				free(cstr);
 			}
 		} else {
-			dbgprintf("imfile: program error, non-handled "
+			DBGPRINTF("imfile: program error, non-handled "
 			  "param '%s' in beginCnfLoad\n", modpblk.descr[i].name);
 		}
 	}
@@ -1086,7 +1161,7 @@ CODESTARTendCnfLoad
 		/* persist module-specific settings from legacy config system */
 		loadModConf->iPollInterval = cs.iPollInterval;
 	}
-	dbgprintf("imfile: opmode is %d, polling interval is %d\n",
+	DBGPRINTF("imfile: opmode is %d, polling interval is %d\n",
 		  loadModConf->opMode,
 		  loadModConf->iPollInterval);
 
@@ -1168,7 +1243,7 @@ ENDfreeCnf
  * So even if we found some lines, it is highly unlikely to find a new one
  * just now. Trying it would result in a performance-costly additional try
  * which in the very, very vast majority of cases will never find any new
- * lines. 
+ * lines.
  * On spamming the main queue: keep in mind that it will automatically rate-limit
  * ourselfes if we begin to overrun it. So we really do not need to care here.
  */
@@ -1197,7 +1272,7 @@ doPolling(void)
 		if(glbl.GetGlobalInputTermState() == 0)
 			srSleep(runModConf->iPollInterval, 10);
 	}
-	
+
 	RETiRet;
 }
 
@@ -1213,24 +1288,26 @@ fileTableInit(fileTable_t *const __restrict__ tab, const int nelem)
 finalize_it:
 	RETiRet;
 }
-
+/* uncomment if needed
 static void
 fileTableDisplay(fileTable_t *tab)
 {
 	int f;
 	uchar *baseName;
-	dbgprintf("DDDD: imfile: dirs.currMaxfiles %d\n", tab->currMax);
+	DBGPRINTF("imfile: dirs.currMaxfiles %d\n", tab->currMax);
 	for(f = 0 ; f < tab->currMax ; ++f) {
 		baseName = tab->listeners[f].pLstn->pszBaseName;
-		dbgprintf("DDDD: imfile: TABLE %p CONTENTS, %d->%p:'%s'\n", tab, f, tab->listeners[f].pLstn, (char*)baseName);
+		DBGPRINTF("imfile: TABLE %p CONTENTS, %d->%p:'%s'\n", tab, f, tab->listeners[f].pLstn, (char*)baseName);
 	}
 }
+*/
+
 static int
 fileTableSearch(fileTable_t *const __restrict__ tab, uchar *const __restrict__ fn)
 {
 	int f;
-	uchar *baseName;
-fileTableDisplay(tab);
+	uchar *baseName = NULL;
+	/* UNCOMMENT FOR DEBUG fileTableDisplay(tab); */
 	for(f = 0 ; f < tab->currMax ; ++f) {
 		baseName = tab->listeners[f].pLstn->pszBaseName;
 		if(!fnmatch((char*)baseName, (char*)fn, FNM_PATHNAME | FNM_PERIOD))
@@ -1238,19 +1315,34 @@ fileTableDisplay(tab);
 	}
 	if(f == tab->currMax)
 		f = -1;
-	dbgprintf("DDDD: file '%s', found:%d\n", fn, f);
+	DBGPRINTF("imfile: fileTableSearch file '%s' - '%s', found:%d\n", fn, baseName, f);
 	return f;
 }
 
-/* add file to file table */ 
+static int
+fileTableSearchNoWildcard(fileTable_t *const __restrict__ tab, uchar *const __restrict__ fn)
+{
+	int f;
+	uchar *baseName = NULL;
+	/* UNCOMMENT FOR DEBUG fileTableDisplay(tab); */
+	for(f = 0 ; f < tab->currMax ; ++f) {
+		baseName = tab->listeners[f].pLstn->pszBaseName;
+		if (strcmp((const char*)baseName, (const char*)fn) == 0)
+			break; /* found */
+	}
+	if(f == tab->currMax)
+		f = -1;
+	DBGPRINTF("imfile: fileTableSearchNoWildcard file '%s' - '%s', found:%d\n", fn, baseName, f);
+	return f;
+}
+
+/* add file to file table */
 static rsRetVal
 fileTableAddFile(fileTable_t *const __restrict__ tab, lstn_t *const __restrict__ pLstn)
 {
 	int j;
 	DEFiRet;
-
-dbgprintf("DDDDD: imfile: fileTableAddFile\n");
-fileTableDisplay(tab);
+	/* UNCOMMENT FOR DEBUG fileTableDisplay(tab); */
 	for(j = 0 ; j < tab->currMax && tab->listeners[j].pLstn != pLstn ; ++j)
 		; /* just scan */
 	if(j < tab->currMax) {
@@ -1322,6 +1414,7 @@ dirsAdd(uchar *dirName)
 			errmsg.LogError(0, RS_RET_OUT_OF_MEMORY,
 					"cannot alloc memory to monitor directory '%s' - ignoring",
 					dirName);
+			ABORT_FINALIZE(RS_RET_OUT_OF_MEMORY);
 		}
 		dirs = newDirTab;
 		allocMaxDirs = newMax;
@@ -1334,7 +1427,7 @@ dirsAdd(uchar *dirName)
 	CHKiRet(fileTableInit(&dirs[currMaxDirs].configured, INIT_FILE_IN_DIR_TAB_SIZE));
 
 	++currMaxDirs;
-	dbgprintf("DDDD: imfile: added to dirs table: '%s'\n", dirName);
+	DBGPRINTF("imfile: added to dirs table: '%s'\n", dirName);
 finalize_it:
 	RETiRet;
 }
@@ -1352,7 +1445,6 @@ dirsFindDir(uchar *dir)
 		; /* just scan, all done in for() */
 	if(i == currMaxDirs)
 		i = -1;
-	//dbgprintf("DDDD: dir '%s', found:%d\n", dir, i);
 	return i;
 }
 
@@ -1397,9 +1489,9 @@ dirsAddFile(lstn_t *__restrict__ pLstn, const int bActive)
 
 	dir = dirs + dirIdx;
 	CHKiRet(fileTableAddFile((bActive ? &dir->active : &dir->configured), pLstn));
-	dbgprintf("DDDD: associated file [%s] to directory %d[%s]\n",
-		pLstn->pszFileName, dirIdx, dir->dirName);
-fileTableDisplay(bActive ? &dir->active : &dir->configured);
+	DBGPRINTF("imfile: associated file [%s] to directory %d[%s], Active = %d\n",
+		pLstn->pszFileName, dirIdx, dir->dirName, bActive);
+	/* UNCOMMENT FOR DEBUG fileTableDisplay(bActive ? &dir->active : &dir->configured); */
 finalize_it:
 	RETiRet;
 }
@@ -1409,14 +1501,14 @@ static void
 in_setupDirWatch(const int dirIdx)
 {
 	int wd;
-	wd = inotify_add_watch(ino_fd, (char*)dirs[dirIdx].dirName, IN_CREATE|IN_DELETE);
+	wd = inotify_add_watch(ino_fd, (char*)dirs[dirIdx].dirName, IN_CREATE|IN_DELETE|IN_MOVED_FROM);
 	if(wd < 0) {
 		DBGPRINTF("imfile: could not create dir watch for '%s'\n",
 			dirs[dirIdx].dirName);
 		goto done;
 	}
 	wdmapAdd(wd, dirIdx, NULL);
-	dbgprintf("DDDD: watch %d added for dir %s\n", wd, dirs[dirIdx].dirName);
+	DBGPRINTF("imfile: watch %d added for dir %s\n", wd, dirs[dirIdx].dirName);
 done:	return;
 }
 
@@ -1431,6 +1523,7 @@ done:	return;
 static void
 startLstnFile(lstn_t *const __restrict__ pLstn)
 {
+	rsRetVal localRet;
 	const int wd = inotify_add_watch(ino_fd, (char*)pLstn->pszFileName, IN_MODIFY);
 	if(wd < 0) {
 		char errStr[512];
@@ -1440,8 +1533,11 @@ startLstnFile(lstn_t *const __restrict__ pLstn)
 			  pLstn->pszFileName, errStr);
 		goto done;
 	}
-	wdmapAdd(wd, -1, pLstn);
-	dbgprintf("DDDD: watch %d added for file %s\n", wd, pLstn->pszFileName);
+	if((localRet = wdmapAdd(wd, -1, pLstn)) != RS_RET_OK) {
+		DBGPRINTF("imfile: error %d adding file to wdmap, ignoring\n", localRet);
+		goto done;
+	}
+	DBGPRINTF("imfile: watch %d added for file %s\n", wd, pLstn->pszFileName);
 	dirsAddFile(pLstn, ACTIVE_FILE);
 	pollFile(pLstn, NULL);
 done:	return;
@@ -1461,7 +1557,7 @@ in_setupFileWatchDynamic(lstn_t *pLstn, uchar *const __restrict__ newBaseName)
 	if(stat(fullfn, &fileInfo) != 0) {
 		char errStr[1024];
 		rs_strerror_r(errno, errStr, sizeof(errStr));
-		dbgprintf("imfile: ignoring file '%s' cannot stat(): %s\n",
+		DBGPRINTF("imfile: ignoring file '%s' cannot stat(): %s\n",
 			fullfn, errStr);
 		goto done;
 	}
@@ -1484,7 +1580,7 @@ done:	return;
  * happen only for things after the watch has been activated.
  */
 static void
-in_setupFileWatchStatic(lstn_t *const __restrict__ pLstn)
+in_setupFileWatchStatic(lstn_t *pLstn)
 {
 	DBGPRINTF("imfile: adding file '%s' to configured table\n",
 		  pLstn->pszFileName);
@@ -1505,10 +1601,17 @@ in_setupFileWatchStatic(lstn_t *const __restrict__ pLstn)
 				getBasename(basen, file);
 				in_setupFileWatchDynamic(pLstn, basen);
 			}
+			globfree(&files);
 		}
 	} else {
+		/* Duplicate static object as well, otherwise the configobject could be deleted later! */
+		if(lstnDup(&pLstn, pLstn->pszBaseName) != RS_RET_OK) {
+			DBGPRINTF("imfile: in_setupFileWatchStatic failed to duplicate listener for '%s'\n", pLstn->pszFileName);
+			goto done;
+		}
 		startLstnFile(pLstn);
 	}
+done:	return;
 }
 
 /* setup our initial set of watches, based on user config */
@@ -1532,71 +1635,65 @@ static void
 in_dbg_showEv(struct inotify_event *ev)
 {
 	if(ev->mask & IN_IGNORED) {
-		dbgprintf("watch was REMOVED\n");
+		DBGPRINTF("INOTIFY event: watch was REMOVED\n");
 	} else if(ev->mask & IN_MODIFY) {
-		dbgprintf("watch was MODIFID\n");
+		DBGPRINTF("INOTIFY event: watch was MODIFID\n");
 	} else if(ev->mask & IN_ACCESS) {
-		dbgprintf("watch IN_ACCESS\n");
+		DBGPRINTF("INOTIFY event: watch IN_ACCESS\n");
 	} else if(ev->mask & IN_ATTRIB) {
-		dbgprintf("watch IN_ATTRIB\n");
+		DBGPRINTF("INOTIFY event: watch IN_ATTRIB\n");
 	} else if(ev->mask & IN_CLOSE_WRITE) {
-		dbgprintf("watch IN_CLOSE_WRITE\n");
+		DBGPRINTF("INOTIFY event: watch IN_CLOSE_WRITE\n");
 	} else if(ev->mask & IN_CLOSE_NOWRITE) {
-		dbgprintf("watch IN_CLOSE_NOWRITE\n");
+		DBGPRINTF("INOTIFY event: watch IN_CLOSE_NOWRITE\n");
 	} else if(ev->mask & IN_CREATE) {
-		dbgprintf("file was CREATED: %s\n", ev->name);
+		DBGPRINTF("INOTIFY event: file was CREATED: %s\n", ev->name);
 	} else if(ev->mask & IN_DELETE) {
-		dbgprintf("watch IN_DELETE\n");
+		DBGPRINTF("INOTIFY event: watch IN_DELETE\n");
 	} else if(ev->mask & IN_DELETE_SELF) {
-		dbgprintf("watch IN_DELETE_SELF\n");
+		DBGPRINTF("INOTIFY event: watch IN_DELETE_SELF\n");
 	} else if(ev->mask & IN_MOVE_SELF) {
-		dbgprintf("watch IN_MOVE_SELF\n");
+		DBGPRINTF("INOTIFY event: watch IN_MOVE_SELF\n");
 	} else if(ev->mask & IN_MOVED_FROM) {
-		dbgprintf("watch IN_MOVED_FROM\n");
+		DBGPRINTF("INOTIFY event: watch IN_MOVED_FROM\n");
 	} else if(ev->mask & IN_MOVED_TO) {
-		dbgprintf("watch IN_MOVED_TO\n");
+		DBGPRINTF("INOTIFY event: watch IN_MOVED_TO\n");
 	} else if(ev->mask & IN_OPEN) {
-		dbgprintf("watch IN_OPEN\n");
+		DBGPRINTF("INOTIFY event: watch IN_OPEN\n");
 	} else if(ev->mask & IN_ISDIR) {
-		dbgprintf("watch IN_ISDIR\n");
+		DBGPRINTF("INOTIFY event: watch IN_ISDIR\n");
 	} else {
-		dbgprintf("unknown mask code %8.8x\n", ev->mask);
+		DBGPRINTF("INOTIFY event: unknown mask code %8.8x\n", ev->mask);
 	 }
 }
 
-static void
-filesDisplay(void)
-{
-	lstn_t *pLstn;
-	for(pLstn = runModConf->pRootLstn ; pLstn != NULL ; pLstn = pLstn->next)
-		dbgprintf("DDDD: files: [%p]: '%s'\n", pLstn, pLstn->pszFileName);
-}
 
 /* inotify told us that a file's wd was closed. We now need to remove
  * the file from our internal structures. Remember that a different inode
  * with the same name may already be in processing.
  */
 static void
-in_removeFile(const struct inotify_event *const ev,
-	      const int dirIdx,
+in_removeFile(const int dirIdx,
 	      lstn_t *const __restrict__ pLstn)
 {
-filesDisplay(); // TODO: remove after initial unstable release(s)
 	uchar statefile[MAXFNAME];
 	uchar toDel[MAXFNAME];
 	int bDoRMState;
+        int wd;
 	uchar *statefn;
-	DBGPRINTF("imfile: remove listener '%s', wd %d\n",
-	          pLstn->pszFileName, ev->wd);
+	DBGPRINTF("imfile: remove listener '%s', dirIdx %d\n",
+	          pLstn->pszFileName, dirIdx);
 	if(pLstn->bRMStateOnDel) {
 		statefn = getStateFileName(pLstn, statefile, sizeof(statefile));
-		snprintf((char*)toDel, sizeof(toDel) / sizeof(uchar), "%s/%s",
+		snprintf((char*)toDel, sizeof(toDel), "%s/%s",
 				     glbl.GetWorkDir(), (char*)statefn);
 		bDoRMState = 1;
 	} else {
 		bDoRMState = 0;
 	}
 	pollFile(pLstn, NULL); /* one final try to gather data */
+	/*	delete listener data */
+	DBGPRINTF("imfile: DELETING listener data for '%s' - '%s'\n", pLstn->pszBaseName, pLstn->pszFileName);
 	lstnDel(pLstn);
 	fileTableDelFile(&dirs[dirIdx].active, pLstn);
 	if(bDoRMState) {
@@ -1608,6 +1705,8 @@ filesDisplay(); // TODO: remove after initial unstable release(s)
 				"file \"%s\": %s", toDel, errStr);
 		}
 	}
+        wd = wdmapLookupListner(pLstn);
+        wdmapDel(wd);
 }
 
 static void
@@ -1619,17 +1718,17 @@ in_handleDirEventCREATE(struct inotify_event *ev, const int dirIdx)
 	if(ftIdx >= 0) {
 		pLstn = dirs[dirIdx].active.listeners[ftIdx].pLstn;
 	} else {
-		dbgprintf("imfile: file '%s' not active in dir '%s'\n",
+		DBGPRINTF("imfile: file '%s' not active in dir '%s'\n",
 			ev->name, dirs[dirIdx].dirName);
 		ftIdx = fileTableSearch(&dirs[dirIdx].configured, (uchar*)ev->name);
 		if(ftIdx == -1) {
-			dbgprintf("imfile: file '%s' not associated with dir '%s'\n",
+			DBGPRINTF("imfile: file '%s' not associated with dir '%s'\n",
 				ev->name, dirs[dirIdx].dirName);
 			goto done;
 		}
 		pLstn = dirs[dirIdx].configured.listeners[ftIdx].pLstn;
 	}
-	dbgprintf("DDDD: file '%s' associated with dir '%s'\n", ev->name, dirs[dirIdx].dirName);
+	DBGPRINTF("imfile: file '%s' associated with dir '%s'\n", ev->name, dirs[dirIdx].dirName);
 	in_setupFileWatchDynamic(pLstn, (uchar*)ev->name);
 done:	return;
 }
@@ -1645,20 +1744,20 @@ in_handleDirEventDELETE(struct inotify_event *const ev, const int dirIdx)
 {
 	const int ftIdx = fileTableSearch(&dirs[dirIdx].active, (uchar*)ev->name);
 	if(ftIdx == -1) {
-		dbgprintf("imfile: deleted file '%s' not active in dir '%s'\n",
+		DBGPRINTF("imfile: deleted file '%s' not active in dir '%s'\n",
 			ev->name, dirs[dirIdx].dirName);
 		goto done;
 	}
-	dbgprintf("DDDD: imfile delete processing for '%s'\n",
+	DBGPRINTF("imfile: imfile delete processing for '%s'\n",
 	          dirs[dirIdx].active.listeners[ftIdx].pLstn->pszFileName);
-	in_removeFile(ev, dirIdx, dirs[dirIdx].active.listeners[ftIdx].pLstn);
+	in_removeFile(dirIdx, dirs[dirIdx].active.listeners[ftIdx].pLstn);
 done:	return;
 }
 
 static void
 in_handleDirEvent(struct inotify_event *const ev, const int dirIdx)
 {
-	dbgprintf("DDDD: handle dir event for %s\n", dirs[dirIdx].dirName);
+	DBGPRINTF("imfile: handle dir event for %s\n", dirs[dirIdx].dirName);
 	if((ev->mask & IN_CREATE)) {
 		in_handleDirEventCREATE(ev, dirIdx);
 	} else if((ev->mask & IN_DELETE)) {
@@ -1685,9 +1784,35 @@ static void
 in_processEvent(struct inotify_event *ev)
 {
 	wd_map_t *etry;
+	lstn_t *pLstn;
+	int iRet;
+	int ftIdx;
+	int wd;
 
 	if(ev->mask & IN_IGNORED) {
-		wdmapDel(ev->wd);
+		goto done;
+	} else if(ev->mask & IN_MOVED_FROM) {
+		/* Find wd entry and remove it */
+		etry =  wdmapLookup(ev->wd);
+		if(etry != NULL) {
+			ftIdx = fileTableSearchNoWildcard(&dirs[etry->dirIdx].active, (uchar*)ev->name);
+			DBGPRINTF("imfile: IN_MOVED_FROM Event (ftIdx=%d, name=%s)\n", ftIdx, ev->name);
+			if(ftIdx >= 0) {
+				/* Find listener and wd table index*/
+				pLstn = dirs[etry->dirIdx].active.listeners[ftIdx].pLstn;
+				wd = wdmapLookupListner(pLstn);
+
+				/* Remove file from inotify watch */
+				iRet = inotify_rm_watch(ino_fd, wd); /* Note this will TRIGGER IN_IGNORED Event! */
+				if (iRet != 0) {
+					DBGPRINTF("imfile: inotify_rm_watch error %d (ftIdx=%d, wd=%d, name=%s)\n", errno, ftIdx, wd, ev->name);
+				} else {
+					DBGPRINTF("imfile: inotify_rm_watch successfully removed file from watch (ftIdx=%d, wd=%d, name=%s)\n", ftIdx, wd, ev->name);
+				}
+				in_removeFile(etry->dirIdx, pLstn);
+				DBGPRINTF("imfile: IN_MOVED_FROM Event file removed file (wd=%d, name=%s)\n", wd, ev->name);
+			}
+		}
 		goto done;
 	}
 	etry =  wdmapLookup(ev->wd);
@@ -1695,7 +1820,6 @@ in_processEvent(struct inotify_event *ev)
 		DBGPRINTF("imfile: could not lookup wd %d\n", ev->wd);
 		goto done;
 	}
-	dbgprintf("DDDD: imfile: wd %d got file %p, dir %d\n", ev->wd, etry->pLstn, etry->dirIdx);
 	if(etry->pLstn == NULL) { /* directory? */
 		in_handleDirEvent(ev, etry->dirIdx);
 	} else {
@@ -1705,6 +1829,9 @@ done:	return;
 }
 
 /* Monitor files in inotify mode */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-align" /* TODO: how can we fix these warnings? */
+/* Problem with the warnings: they seem to stem back from the way the API is structured */
 static rsRetVal
 do_inotify()
 {
@@ -1717,6 +1844,10 @@ do_inotify()
 	CHKiRet(wdmapInit());
 	CHKiRet(dirsInit());
 	ino_fd = inotify_init();
+        if(ino_fd < 0) {
+            errmsg.LogError(1, RS_RET_INOTIFY_INIT_FAILED, "imfile: Init inotify instance failed ");
+            return RS_RET_INOTIFY_INIT_FAILED;
+        }
 	DBGPRINTF("imfile: inotify fd %d\n", ino_fd);
 	in_setupInitialWatches();
 
@@ -1725,14 +1856,11 @@ do_inotify()
 		if(rd < 0 && Debug) {
 			char errStr[1024];
 			rs_strerror_r(errno, errStr, sizeof(errStr));
-			dbgprintf("imfile: error during inotify: %s\n", errStr);
+			DBGPRINTF("imfile: error during inotify: %s\n", errStr);
 		}
 		currev = 0;
 		while(currev < rd) {
 			ev = (struct inotify_event*) (iobuf+currev);
-			dbgprintf("DDDD: imfile event notification: rd %d[%d], wd (%d, mask "
-				"%8.8x, cookie %4.4x, len %d)\n",
-				(int) rd, currev, ev->wd, ev->mask, ev->cookie, ev->len);
 			in_dbg_showEv(ev);
 			in_processEvent(ev);
 			currev += sizeof(struct inotify_event) + ev->len;
@@ -1743,6 +1871,7 @@ finalize_it:
 	close(ino_fd);
 	RETiRet;
 }
+#pragma GCC diagnostic pop
 
 #else /* #if HAVE_INOTIFY_INIT */
 static rsRetVal
@@ -1761,7 +1890,7 @@ do_inotify()
  */
 BEGINrunInput
 CODESTARTrunInput
-	DBGPRINTF("imfile: working in %s mode\n", 
+	DBGPRINTF("imfile: working in %s mode\n",
 		 (runModConf->opMode == OPMODE_POLLING) ? "polling" : "inotify");
 	if(runModConf->opMode == OPMODE_POLLING)
 		iRet = doPolling();
@@ -1822,7 +1951,7 @@ persistStrmState(lstn_t *pLstn)
 finalize_it:
 	if(psSF != NULL)
 		strm.Destruct(&psSF);
-	
+
 	if(iRet != RS_RET_OK) {
 		errmsg.LogError(0, iRet, "imfile: could not persist state "
 				"file %s - data may be repeated on next "
@@ -1869,12 +1998,15 @@ CODESTARTmodExit
 	objRelease(errmsg, CORE_COMPONENT);
 	objRelease(prop, CORE_COMPONENT);
 	objRelease(ruleset, CORE_COMPONENT);
+#if HAVE_INOTIFY_INIT
+	/* we use these vars only in inotify mode */
 	if(dirs != NULL) {
 		free(dirs->active.listeners);
 		free(dirs->configured.listeners);
 		free(dirs);
 	}
 	free(wdmap);
+#endif
 ENDmodExit
 
 
@@ -1911,8 +2043,8 @@ resetConfigVariables(uchar __attribute__((unused)) *pp, void __attribute__((unus
 	cs.iFacility = 128; /* local0 */
 	cs.iSeverity = 5;  /* notice, as of rfc 3164 */
 	cs.readMode = 0;
-	cs.pBindRuleset = NULL;
 	cs.maxLinesAtOnce = 10240;
+	cs.trimLineOverBytes = 0;
 
 	RETiRet;
 }
@@ -1959,6 +2091,8 @@ CODEmodInit_QueryRegCFSLineHdlr
 	  	NULL, &cs.readMode, STD_LOADABLE_MODULE_ID));
 	CHKiRet(omsdRegCFSLineHdlr((uchar *)"inputfilemaxlinesatonce", 0, eCmdHdlrSize,
 	  	NULL, &cs.maxLinesAtOnce, STD_LOADABLE_MODULE_ID));
+	CHKiRet(omsdRegCFSLineHdlr((uchar *)"inputfiletrimlineoverbytes", 0, eCmdHdlrSize,
+	  	NULL, &cs.trimLineOverBytes, STD_LOADABLE_MODULE_ID));
 	CHKiRet(omsdRegCFSLineHdlr((uchar *)"inputfilepersiststateinterval", 0, eCmdHdlrInt,
 	  	NULL, &cs.iPersistStateInterval, STD_LOADABLE_MODULE_ID));
 	CHKiRet(omsdRegCFSLineHdlr((uchar *)"inputfilebindruleset", 0, eCmdHdlrGetWord,
