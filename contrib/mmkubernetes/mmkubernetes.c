@@ -72,7 +72,7 @@ DEF_OMOD_STATIC_DATA
 DEFobjCurrIf(errmsg)
 DEFobjCurrIf(regexp)
 
-#define DFLT_FILENAME_REGEX "var\\.log\\.containers\\.([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*)_([^_]+)_(.+)-([a-z0-9]{64})\\.log$"
+#define DFLT_FILENAME_REGEX "var/log/containers/([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*)_([^_]+)_(.+)-([a-z0-9]{64})\\.log$"
 #define DFLT_SRCMD_PATH "$!metadata!filename"
 #define DFLT_DSTMD_PATH "$!metadata"
 
